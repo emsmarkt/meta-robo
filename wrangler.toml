@@ -9,7 +9,7 @@ crons = ["*/5 * * * *"]
 # Variaveis (texto). Os SECRETS (META_TOKENS e RT_TOKEN) sao adicionados
 # no painel do Cloudflare (Settings -> Variaveis e segredos), NUNCA no Git.
 [vars]
-APPLY_MODE = "live"
+APPLY_MODE = "dry"
 RT_PTYPE = "1"
 RT_ICTYPE = "2"
 
