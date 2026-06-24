@@ -168,17 +168,28 @@ async function collect(env) {
   if (env.RT_TOKEN) {
     var pType = env.RT_PTYPE || '1';
     var url = RT_API + '/report?api_key=' + encodeURIComponent(env.RT_TOKEN) + '&group=sub3&date_from=' + brDatePlus(0) + '&date_to=' + brDatePlus(0) + '&per=1000';
-    var d = await fj(url).catch(function () { return {}; });
+    var d = {};
+    try {
+      var resp = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0 (compatible; CBORobo/1.0)' } });
+      DIAG.rtHttp = resp.status;
+      d = await resp.json();
+    } catch (e) { DIAG.rtFetchErr = String((e && e.message) || e); d = {}; }
     var rows = d.items || d.data || d.report || (Array.isArray(d) ? d : []);
     DIAG.rtRows = Array.isArray(rows) ? rows.length : 0;
     DIAG.rtError = (d && d.error) ? (d.error.message || JSON.stringify(d.error)) : null;
-    DIAG.rtSampleKeys = (Array.isArray(rows) && rows[0]) ? Object.keys(rows[0]).slice(0, 25).join(',') : '';
+    DIAG.rtSampleKeys = (Array.isArray(rows) && rows[0]) ? Object.keys(rows[0]).slice(0, 30).join(',') : '';
     DIAG.rtSampleSub3 = (Array.isArray(rows) && rows[0]) ? rows[0].sub3 : null;
     var fx = parseFloat(env.R_FX) || 5.1;
     var pickNum = function(o, ks){ for (var i=0;i<ks.length;i++){ var v=o[ks[i]]; if (v!=null && v!=='' && !isNaN(parseFloat(v))) return parseFloat(v); } return 0; };
     var by = {}, byCost = {};
     (Array.isArray(rows) ? rows : []).forEach(function (row) {
-      if (row.sub3 != null) { by[String(row.sub3)] = parseInt(row['convtype' + pType]) || 0; byCost[String(row.sub3)] = pickNum(row, ['cost','total_cost','spend','ad_cost']); }
+      if (row.sub3 != null) {
+        /* Vendas = convtype{N}; se 0, cai pra 'approved' (algumas contas usam esse campo). */
+        var s = parseInt(row['convtype' + pType]) || 0;
+        if (!s) s = parseInt(row.approved) || 0;
+        by[String(row.sub3)] = s;
+        byCost[String(row.sub3)] = pickNum(row, ['cost','total_cost','spend','ad_cost']);
+      }
     });
     camps.forEach(function (c) {
       c._sales = by[String(c.id)] || 0;
