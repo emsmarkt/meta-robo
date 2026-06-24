@@ -15,7 +15,7 @@ var RULES = {
   minSpendJudge: 100, floorDaily: 85,
   cpaTarget: 175, cpaRopeGood: 195, minRoas: 1.1,
   cutNoSaleSpend: 110,
-  excRoas: 2.0, excMinSales: 3, scaleMult: 5, scaleUsePct: 0.2, releaseDaily: 500,
+  excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70,
   alert3dRoas: 1.0, alert3dMinSpend: 150
 };
@@ -27,7 +27,7 @@ function buildRules(env) {
     minSpendJudge: n('R_MINSPEND', 100), floorDaily: n('R_FLOOR', 85),
     cpaTarget: n('R_CPATARGET', 175), cpaRopeGood: n('R_CPAROPE', 195), minRoas: n('R_MINROAS', 1.1),
     cutNoSaleSpend: n('R_CUTNOSALE', 110),
-    excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 5),
+    excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 12),
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70),
     scaleUsePct: n('R_SCALEUSEPCT', 0.2), releaseDaily: n('R_RELEASE', 500),
     alert3dRoas: n('R_ALERT3DROAS', 1.0), alert3dMinSpend: n('R_ALERT3DSPEND', 150)
