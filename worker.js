@@ -11,9 +11,9 @@ var DIAG = {}; // diagnostico da ultima coleta (aparece no /run)
 /* Config das regras — padroes (iguais ao dashboard). Podem ser sobrescritos por VARIAVEIS
    do Cloudflare (R_*), pra ajustar sem mexer no codigo. Veja buildRules(env). */
 var RULES = {
-  dayGood: 1.6, dayOk: 1.3,
+  dayGood: 1.6, dayOk: 1.2,
   minSpendJudge: 100, floorDaily: 85,
-  cpaTarget: 175, cpaRopeGood: 190, minRoas: 1.3,
+  cpaTarget: 175, cpaRopeGood: 190, minRoas: 1.3, minRoasNormal: 1.4, minRoasBad: 1.5, cutDays: 364,
   cutNoSaleSpend: 110,
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70,
@@ -23,9 +23,10 @@ var RULES = {
 function buildRules(env) {
   var n = function(k, d) { var v = env && env[k]; var f = parseFloat(v); return (v !== undefined && v !== '' && !isNaN(f)) ? f : d; };
   return {
-    dayGood: n('R_DAYGOOD', 1.6), dayOk: n('R_DAYOK', 1.3),
-    minSpendJudge: n('R_MINSPEND', 100), floorDaily: n('R_FLOOR', 85),
-    cpaTarget: n('R_CPATARGET', 175), cpaRopeGood: n('R_CPAROPE', 190), minRoas: n('R_MINROAS', 1.3),
+    dayGood: n('R_DAYGOOD', 1.6), dayOk: n('R_DAYOK', 1.2),
+    minSpendJudge: n('R_MINSPEND', 100), floorDaily: n('R_FLOOR', 85), cutDays: n('R_CUTDAYS', 364),
+    cpaTarget: n('R_CPATARGET', 175), cpaRopeGood: n('R_CPAROPE', 190),
+    minRoas: n('R_MINROAS', 1.3), minRoasNormal: n('R_MINROASNORMAL', 1.4), minRoasBad: n('R_MINROASBAD', 1.5),
     cutNoSaleSpend: n('R_CUTNOSALE', 110),
     excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 12),
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70),
@@ -95,9 +96,13 @@ function suggestRule(c, mood) {
   var cpa = sales > 0 ? sp / sales : Infinity;
   var rem = remainingOf(c);
   var ceiling = (mood === 'good' && sales >= 2) ? RULES.cpaRopeGood : RULES.cpaTarget;
+  /* ROAS minimo aceitavel: <=2 vendas -> 1.3; 3+ vendas -> 1.3 (bom)/1.4 (normal)/1.5 (ruim). */
+  var cutFloor = (sales > 2) ? (mood === 'good' ? RULES.minRoas : (mood === 'bad' ? RULES.minRoasBad : RULES.minRoasNormal)) : RULES.minRoas;
+  /* CORTAR = empurra termino p/ +cutDays (364). diario = saldo/364 -> newEnd = +364. */
+  var cortarTarget = rem > 0 ? (rem / RULES.cutDays) : RULES.floorDaily;
   var target = null, action = '', key = '';
   if (sales === 0) {
-    if (sp >= RULES.cutNoSaleSpend) { target = RULES.floorDaily; action = 'CORTAR_100_SEM_VENDA'; key = 'CORTAR'; }
+    if (sp >= RULES.cutNoSaleSpend) { target = cortarTarget; action = 'CORTAR_TERMINO_364_SEM_VENDA'; key = 'CORTAR'; }
     else { action = 'COLETANDO'; key = 'COLETANDO'; }
   } else if (cpa <= ceiling) {
     /* Base = GASTO REAL de hoje (nao o ritmo teorico saldo/dias, que gera escala absurda). */
@@ -110,10 +115,10 @@ function suggestRule(c, mood) {
       if (formula > sp) { target = formula; action = 'AUMENTAR_PROPORCIONAL'; key = 'AUMENTAR'; }
       else { action = 'MANTER'; key = 'MANTER'; }
     }
-  } else if (roas >= RULES.minRoas) {
+  } else if (roas >= cutFloor) {
     target = Math.max(sp, RULES.floorDaily); action = 'LIMITAR_NO_GASTO'; key = 'LIMITAR';
   } else {
-    target = RULES.floorDaily; action = 'CORTAR_100_ROAS_BAIXO'; key = 'CORTAR';
+    target = cortarTarget; action = 'CORTAR_TERMINO_364_ROAS_BAIXO'; key = 'CORTAR';
   }
   var newEnd = (target && rem > 0) ? brDatePlus(Math.max(1, Math.ceil(rem / target))) : null;
   return { action: action, key: key, target: target, newEnd: newEnd, cpa: cpa, roas: roas, sales: sales, spend: sp };
