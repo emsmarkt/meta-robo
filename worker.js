@@ -176,7 +176,7 @@ async function collect(env) {
             cs.forEach(function (c) {
               var es = (c.effective_status || c.status || '').toUpperCase();
               if (es === 'DELETED' || es === 'ARCHIVED') return;
-              if (c.name && c.name.toUpperCase().indexOf('CBO') >= 0 && c.lifetime_budget) {
+              if (c.name && c.name.toUpperCase().indexOf('CBO') >= 0 && c.name.toUpperCase().indexOf('SUBSTITUIDA') < 0 && c.lifetime_budget) {
                 c._tk = acc._tk; c._acctStatus = acc.account_status; c._acctId = acc.id; camps.push(c);
               }
             });
