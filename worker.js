@@ -124,6 +124,33 @@ function suggestRule(c, mood) {
   return { action: action, target: target, newEnd: newEnd, cpa: cpa, roas: roas, sales: sales, spend: sp };
 }
 
+/* Busca o gasto vitalicio de varias campanhas em 1 chamada por token (Meta Batch API).
+   Cada batch (ate 50 ops) conta como 1 subrequest do Worker. */
+async function batchLifetimeSpend(camps, lifeRange) {
+  var byTk = {};
+  camps.forEach(function (c) { (byTk[c._tk] = byTk[c._tk] || []).push(c); });
+  for (var tk in byTk) {
+    var list = byTk[tk];
+    for (var i = 0; i < list.length; i += 50) {
+      var chunk = list.slice(i, i + 50);
+      var batch = chunk.map(function (c) { return { method: 'GET', relative_url: c.id + '/insights?fields=spend&time_range=' + lifeRange }; });
+      var body = new URLSearchParams();
+      body.append('batch', JSON.stringify(batch));
+      body.append('access_token', tk);
+      try {
+        var resp = await fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() });
+        var arr = await resp.json();
+        if (Array.isArray(arr)) {
+          arr.forEach(function (item, idx) {
+            var c = chunk[idx];
+            try { var b = JSON.parse(item.body); c._spend = (b.data && b.data[0]) ? parseFloat(b.data[0].spend) || 0 : 0; } catch (e) { c._spend = 0; }
+          });
+        }
+      } catch (e) { chunk.forEach(function (c) { c._spend = 0; }); }
+    }
+  }
+}
+
 /* ---------- coleta dados (Meta + RedTrack) ---------- */
 async function collect(env) {
   var tokens = JSON.parse(env.META_TOKENS || '[]');
@@ -132,36 +159,48 @@ async function collect(env) {
     var list = await fjPaged(API + '/me/adaccounts?fields=name,account_status&limit=100&access_token=' + tokens[ti]);
     list.forEach(function (a) { var id = a.id.replace('act_', ''); if (!map[id]) { map[id] = a; map[id]._tk = tokens[ti]; } });
   }
-  var accounts = Object.values(map);
+  var accounts = Object.values(map).filter(function (acc) { var an = (acc.name || '').toLowerCase(); return an.indexOf('effective 01') < 0 && an.indexOf('origin') < 0; });
   var camps = [];
-  for (var ai = 0; ai < accounts.length; ai++) {
-    var acc = accounts[ai], an = (acc.name || '').toLowerCase();
-    if (an.indexOf('effective 01') >= 0 || an.indexOf('origin') >= 0) continue;
-    var cs = await fjPaged(API + '/' + acc.id + '/campaigns?fields=name,status,effective_status,lifetime_budget,stop_time&effective_status=["ACTIVE","PAUSED","IN_PROCESS","WITH_ISSUES"]&limit=100&access_token=' + acc._tk);
-    cs.forEach(function (c) {
-      var es = (c.effective_status || c.status || '').toUpperCase();
-      if (es === 'DELETED' || es === 'ARCHIVED') return;
-      if (c.name && c.name.toUpperCase().indexOf('CBO') >= 0 && c.lifetime_budget) {
-        c._tk = acc._tk; c._acctStatus = acc.account_status; c._acctId = acc.id; camps.push(c);
-      }
-    });
+  // Lista campanhas de TODAS as contas em LOTE por token (Meta Batch API) — poucos subrequests.
+  var rel = 'campaigns?fields=name,status,effective_status,lifetime_budget,stop_time&effective_status=' + encodeURIComponent('["ACTIVE","PAUSED","IN_PROCESS","WITH_ISSUES"]') + '&limit=100';
+  var accByTk = {};
+  accounts.forEach(function (acc) { (accByTk[acc._tk] = accByTk[acc._tk] || []).push(acc); });
+  for (var tk in accByTk) {
+    var alist = accByTk[tk];
+    for (var j = 0; j < alist.length; j += 50) {
+      var achunk = alist.slice(j, j + 50);
+      var bb = achunk.map(function (acc) { return { method: 'GET', relative_url: acc.id + '/' + rel }; });
+      var body0 = new URLSearchParams(); body0.append('batch', JSON.stringify(bb)); body0.append('access_token', tk);
+      try {
+        var resp0 = await fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body0.toString() });
+        var arr0 = await resp0.json();
+        if (Array.isArray(arr0)) {
+          arr0.forEach(function (item, idx) {
+            var acc = achunk[idx], cs = [];
+            try { var b = JSON.parse(item.body); cs = b.data || []; } catch (e) {}
+            cs.forEach(function (c) {
+              var es = (c.effective_status || c.status || '').toUpperCase();
+              if (es === 'DELETED' || es === 'ARCHIVED') return;
+              if (c.name && c.name.toUpperCase().indexOf('CBO') >= 0 && c.lifetime_budget) {
+                c._tk = acc._tk; c._acctStatus = acc.account_status; c._acctId = acc.id; camps.push(c);
+              }
+            });
+          });
+        }
+      } catch (e) {}
+    }
   }
   // manter contas ativas OU com campanha ativa
   var keep = {};
   camps.forEach(function (c) { if (c._acctStatus === 1 || (c.effective_status || '').toUpperCase() === 'ACTIVE') keep[c._acctId] = true; });
   camps = camps.filter(function (c) { return keep[c._acctId]; });
 
-  // gasto de hoje + lifetime (p/ saldo) por campanha
-  var todayRange = encodeURIComponent(JSON.stringify({ since: brDatePlus(0), until: brDatePlus(0) }));
+  // GASTO de hoje vem do RedTrack (abaixo). Aqui so o gasto VITALICIO (p/ saldo/remaining),
+  // buscado em LOTE (Meta Batch API) p/ nao estourar o limite de subrequests do Worker.
+  camps.forEach(function (c) { c._spendToday = 0; c._spend = 0; });
   var sinceLife = new Date(); sinceLife.setMonth(sinceLife.getMonth() - 36);
   var lifeRange = encodeURIComponent(JSON.stringify({ since: sinceLife.toISOString().split('T')[0], until: brDatePlus(0) }));
-  for (var ci = 0; ci < camps.length; ci++) {
-    var c = camps[ci];
-    var today = await fj(API + '/' + c.id + '/insights?fields=spend&time_range=' + todayRange + '&access_token=' + c._tk).catch(function () { return {}; });
-    var life = await fj(API + '/' + c.id + '/insights?fields=spend&time_range=' + lifeRange + '&access_token=' + c._tk).catch(function () { return {}; });
-    c._spendToday = (today.data && today.data[0]) ? parseFloat(today.data[0].spend) || 0 : 0;
-    c._spend = (life.data && life.data[0]) ? parseFloat(life.data[0].spend) || 0 : 0;
-  }
+  await batchLifetimeSpend(camps, lifeRange);
 
   // vendas de hoje (RedTrack, por sub3 = campaign_id)
   DIAG = { rtTokenSet: !!env.RT_TOKEN, metaTokens: JSON.parse(env.META_TOKENS || '[]').length, today: brDatePlus(0), fx: parseFloat(env.R_FX) || 5.1, camps: camps.length };
