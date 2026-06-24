@@ -115,12 +115,7 @@ function suggestRule(c, mood) {
   } else {
     target = RULES.floorDaily; action = 'CORTAR_100_ROAS_BAIXO';
   }
-  /* NUNCA encerrar hoje: passou das 23h BR e termina hoje, sem mexer na data -> estende. */
-  var dleft = daysLeftOf(c);
-  var lateBR = (new Date(Date.now() - 3 * 3600 * 1000).getUTCHours()) >= 23;
-  if (lateBR && dleft <= 1 && !target) { target = Math.max(RULES.floorDaily, rem > 0 ? rem / 30 : RULES.floorDaily); action = 'ESTENDER_NAO_ENCERRAR'; }
   var newEnd = (target && rem > 0) ? brDatePlus(Math.max(1, Math.ceil(rem / target))) : null;
-  if (newEnd && newEnd <= brDatePlus(0)) newEnd = brDatePlus(1);
   return { action: action, target: target, newEnd: newEnd, cpa: cpa, roas: roas, sales: sales, spend: sp };
 }
 
