@@ -25,7 +25,7 @@ function buildRules(env) {
   return {
     dayGood: n('R_DAYGOOD', 1.6), dayOk: n('R_DAYOK', 1.2),
     minSpendJudge: n('R_MINSPEND', 100), floorDaily: n('R_FLOOR', 85),
-    cpaTarget: n('R_CPATARGET', 175), cpaRopeGood: n('R_CPAROPE', 195), minRoas: n('R_MINROAS', 1.1),
+    cpaTarget: n('R_CPATARGET', 175), cpaRopeGood: n('R_CPAROPE', 190), minRoas: n('R_MINROAS', 1.1),
     cutNoSaleSpend: n('R_CUTNOSALE', 110),
     excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 12),
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70),
