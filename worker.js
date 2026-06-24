@@ -13,7 +13,7 @@ var DIAG = {}; // diagnostico da ultima coleta (aparece no /run)
 var RULES = {
   dayGood: 1.6, dayOk: 1.2,
   minSpendJudge: 100, floorDaily: 85,
-  cpaTarget: 175, cpaRopeGood: 195, minRoas: 1.4,
+  cpaTarget: 175, cpaRopeGood: 195, minRoas: 1.1,
   cutNoSaleSpend: 110,
   excRoas: 2.0, excMinSales: 3, scaleMult: 5, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70,
@@ -25,7 +25,7 @@ function buildRules(env) {
   return {
     dayGood: n('R_DAYGOOD', 1.6), dayOk: n('R_DAYOK', 1.2),
     minSpendJudge: n('R_MINSPEND', 100), floorDaily: n('R_FLOOR', 85),
-    cpaTarget: n('R_CPATARGET', 175), cpaRopeGood: n('R_CPAROPE', 195), minRoas: n('R_MINROAS', 1.4),
+    cpaTarget: n('R_CPATARGET', 175), cpaRopeGood: n('R_CPAROPE', 195), minRoas: n('R_MINROAS', 1.1),
     cutNoSaleSpend: n('R_CUTNOSALE', 110),
     excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 5),
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70),
@@ -95,28 +95,28 @@ function suggestRule(c, mood) {
   var cpa = sales > 0 ? sp / sales : Infinity;
   var rem = remainingOf(c);
   var ceiling = (mood === 'good' && sales >= 2) ? RULES.cpaRopeGood : RULES.cpaTarget;
-  var target = null, action = '';
+  var target = null, action = '', key = '';
   if (sales === 0) {
-    if (sp >= RULES.cutNoSaleSpend) { target = RULES.floorDaily; action = 'CORTAR_100_SEM_VENDA'; }
-    else action = 'COLETANDO';
+    if (sp >= RULES.cutNoSaleSpend) { target = RULES.floorDaily; action = 'CORTAR_100_SEM_VENDA'; key = 'CORTAR'; }
+    else { action = 'COLETANDO'; key = 'COLETANDO'; }
   } else if (cpa <= ceiling) {
     var cur = currentDailyOf(c);
     var baseDaily = cur > 0 ? cur : (rem > 0 ? Math.max(RULES.floorDaily, rem / 30) : RULES.floorDaily);
     var excellent = (roas >= RULES.excRoas) || (sp < 1 && sales > 0);
-    if (excellent) { target = baseDaily * RULES.scaleMult; action = 'ESCALAR'; }
+    if (excellent) { target = baseDaily * RULES.scaleMult; action = 'ESCALAR'; key = 'ESCALAR'; }
     else {
       var pct = Math.max(RULES.aumPctLow, Math.min(RULES.aumPctHigh, RULES.aumPctLow + (roas - RULES.aumRoasLow) / (RULES.aumRoasHigh - RULES.aumRoasLow) * (RULES.aumPctHigh - RULES.aumPctLow)));
       var formula = Math.max(RULES.floorDaily, sales * RULES.cpaTarget * (1 + pct));
-      if (formula > cur) { target = formula; action = 'AUMENTAR_PROPORCIONAL'; }
-      else action = 'MANTER';
+      if (formula > cur) { target = formula; action = 'AUMENTAR_PROPORCIONAL'; key = 'AUMENTAR'; }
+      else { action = 'MANTER'; key = 'MANTER'; }
     }
   } else if (roas >= RULES.minRoas) {
-    target = Math.max(sp, RULES.floorDaily); action = 'LIMITAR_NO_GASTO';
+    target = Math.max(sp, RULES.floorDaily); action = 'LIMITAR_NO_GASTO'; key = 'LIMITAR';
   } else {
-    target = RULES.floorDaily; action = 'CORTAR_100_ROAS_BAIXO';
+    target = RULES.floorDaily; action = 'CORTAR_100_ROAS_BAIXO'; key = 'CORTAR';
   }
   var newEnd = (target && rem > 0) ? brDatePlus(Math.max(1, Math.ceil(rem / target))) : null;
-  return { action: action, target: target, newEnd: newEnd, cpa: cpa, roas: roas, sales: sales, spend: sp };
+  return { action: action, key: key, target: target, newEnd: newEnd, cpa: cpa, roas: roas, sales: sales, spend: sp };
 }
 
 /* Busca o gasto vitalicio de varias campanhas em 1 chamada por token (Meta Batch API).
@@ -262,23 +262,32 @@ async function run(env) {
   var tokens = JSON.parse(env.META_TOKENS || '[]');
   var camps = await collect(env);
   var moodObj = computeMood(camps);
+  /* Mapa da ULTIMA regra aplicada por campanha (compartilhado c/ o dashboard). Usado p/ NAO
+     reaplicar a MESMA regra consecutivamente (ex: LIMITAR nao repete enquanto a campanha fica
+     na faixa). Se ela MUDAR de regra (ex: vira ESCALAR) e DEPOIS voltar pra LIMITAR, reaplica,
+     porque a ultima aplicada passou a ser ESCALAR. Reseta no dia seguinte. */
+  var appliedMap = {}; try { var am = await env.RULES_KV.get('applied'); if (am) appliedMap = JSON.parse(am); } catch (e) {}
+  var appliedDirty = false, today = brDatePlus(0);
   var actions = [];
   for (var i = 0; i < camps.length; i++) {
     var c = camps[i];
     var r = suggestRule(c, moodObj.mood);
-    var alert3d = (c._spend3d >= RULES.alert3dMinSpend && (c._roas3d || 0) < RULES.alert3dRoas); // 3d opcional (não coletado aqui ainda)
     actions.push({ name: c.name, id: c.id, action: r.action, target: r.target, newEnd: r.newEnd, sales: r.sales, spend: Math.round(r.spend), cpa: isFinite(r.cpa) ? Math.round(r.cpa) : null, roas: +r.roas.toFixed(2) });
 
-    if ((env.APPLY_MODE || 'dry') === 'live' && r.newEnd) {
-      // cooldown 60 min por campanha
+    if ((env.APPLY_MODE || 'dry') === 'live' && r.newEnd && r.key) {
+      var prev = appliedMap[c.id];
+      var sameAsLast = prev && prev.day === today && prev.sig === r.key; // a ULTIMA aplicada hoje ja foi essa mesma regra -> nao repete (mas reaplica se mudou e voltou)
       var ck = 'cd:' + c.id, last = 0;
       try { last = parseInt(await env.RULES_KV.get(ck)) || 0; } catch (e) {}
-      if (Date.now() - last >= 60 * 60 * 1000) {
+      if (!sameAsLast && (Date.now() - last >= 60 * 60 * 1000)) {
         await applyChange(c, tokens, r.newEnd);
         try { await env.RULES_KV.put(ck, String(Date.now())); } catch (e) {}
+        appliedMap[c.id] = { sig: r.key, action: r.action, t: Date.now(), day: today };
+        appliedDirty = true;
       }
     }
   }
+  if (appliedDirty) { try { await env.RULES_KV.put('applied', JSON.stringify(appliedMap)); } catch (e) {} }
   var log = { at: new Date().toISOString(), mode: env.APPLY_MODE || 'dry', mood: moodObj.mood, moodRoas: +moodObj.roas.toFixed(2), count: camps.length, diag: DIAG, actions: actions };
   try { await env.RULES_KV.put('lastRun', JSON.stringify(log)); } catch (e) {}
   return log;
