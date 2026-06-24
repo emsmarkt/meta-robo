@@ -11,10 +11,11 @@ var RT_API = 'https://api.redtrack.io';
    do Cloudflare (R_*), pra ajustar sem mexer no codigo. Veja buildRules(env). */
 var RULES = {
   dayGood: 1.6, dayOk: 1.2,
-  minSpendJudge: 100, floorDaily: 100,
+  minSpendJudge: 100, floorDaily: 85,
   cpaTarget: 175, cpaRopeGood: 195, minRoas: 1.4,
-  cutNoSaleSpend: 120,
+  cutNoSaleSpend: 110,
   excRoas: 2.0, excMinSales: 3, scaleMult: 5, scaleUsePct: 0.2, releaseDaily: 500,
+  aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70,
   alert3dRoas: 1.0, alert3dMinSpend: 150
 };
 /* Le os parametros das variaveis do Cloudflare (se existirem), senao usa o padrao acima. */
@@ -22,10 +23,11 @@ function buildRules(env) {
   var n = function(k, d) { var v = env && env[k]; var f = parseFloat(v); return (v !== undefined && v !== '' && !isNaN(f)) ? f : d; };
   return {
     dayGood: n('R_DAYGOOD', 1.6), dayOk: n('R_DAYOK', 1.2),
-    minSpendJudge: n('R_MINSPEND', 100), floorDaily: n('R_FLOOR', 100),
+    minSpendJudge: n('R_MINSPEND', 100), floorDaily: n('R_FLOOR', 85),
     cpaTarget: n('R_CPATARGET', 175), cpaRopeGood: n('R_CPAROPE', 195), minRoas: n('R_MINROAS', 1.4),
-    cutNoSaleSpend: n('R_CUTNOSALE', 120),
+    cutNoSaleSpend: n('R_CUTNOSALE', 110),
     excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 5),
+    aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70),
     scaleUsePct: n('R_SCALEUSEPCT', 0.2), releaseDaily: n('R_RELEASE', 500),
     alert3dRoas: n('R_ALERT3DROAS', 1.0), alert3dMinSpend: n('R_ALERT3DSPEND', 150)
   };
@@ -98,15 +100,26 @@ function suggestRule(c, mood) {
     else action = 'COLETANDO';
   } else if (cpa <= ceiling) {
     var cur = currentDailyOf(c);
-    if (roas >= RULES.excRoas && sales >= RULES.excMinSales && cur > 0 && sp >= RULES.scaleUsePct * cur) { target = cur * RULES.scaleMult; action = 'ESCALAR'; }
-    else if (cur > 0 && cur < sp) { target = Math.max(RULES.releaseDaily, sp); action = 'AUMENTAR_LIBERA'; }
-    else action = 'MANTER';
+    var baseDaily = cur > 0 ? cur : (rem > 0 ? Math.max(RULES.floorDaily, rem / 30) : RULES.floorDaily);
+    var excellent = (roas >= RULES.excRoas) || (sp < 1 && sales > 0);
+    if (excellent) { target = baseDaily * RULES.scaleMult; action = 'ESCALAR'; }
+    else {
+      var pct = Math.max(RULES.aumPctLow, Math.min(RULES.aumPctHigh, RULES.aumPctLow + (roas - RULES.aumRoasLow) / (RULES.aumRoasHigh - RULES.aumRoasLow) * (RULES.aumPctHigh - RULES.aumPctLow)));
+      var formula = Math.max(RULES.floorDaily, sales * RULES.cpaTarget * (1 + pct));
+      if (formula > cur) { target = formula; action = 'AUMENTAR_PROPORCIONAL'; }
+      else action = 'MANTER';
+    }
   } else if (roas >= RULES.minRoas) {
     target = Math.max(sp, RULES.floorDaily); action = 'LIMITAR_NO_GASTO';
   } else {
     target = RULES.floorDaily; action = 'CORTAR_100_ROAS_BAIXO';
   }
+  /* NUNCA encerrar hoje: passou das 23h BR e termina hoje, sem mexer na data -> estende. */
+  var dleft = daysLeftOf(c);
+  var lateBR = (new Date(Date.now() - 3 * 3600 * 1000).getUTCHours()) >= 23;
+  if (lateBR && dleft <= 1 && !target) { target = Math.max(RULES.floorDaily, rem > 0 ? rem / 30 : RULES.floorDaily); action = 'ESTENDER_NAO_ENCERRAR'; }
   var newEnd = (target && rem > 0) ? brDatePlus(Math.max(1, Math.ceil(rem / target))) : null;
+  if (newEnd && newEnd <= brDatePlus(0)) newEnd = brDatePlus(1);
   return { action: action, target: target, newEnd: newEnd, cpa: cpa, roas: roas, sales: sales, spend: sp };
 }
 
@@ -155,9 +168,18 @@ async function collect(env) {
     var url = RT_API + '/report?api_key=' + encodeURIComponent(env.RT_TOKEN) + '&group=sub3&date_from=' + brDatePlus(0) + '&date_to=' + brDatePlus(0) + '&per=1000';
     var d = await fj(url).catch(function () { return {}; });
     var rows = d.items || d.data || d.report || (Array.isArray(d) ? d : []);
-    var by = {};
-    (Array.isArray(rows) ? rows : []).forEach(function (row) { if (row.sub3 != null) by[String(row.sub3)] = parseInt(row['convtype' + pType]) || 0; });
-    camps.forEach(function (c) { c._sales = by[String(c.id)] || 0; });
+    var fx = parseFloat(env.R_FX) || 5.1;
+    var pickNum = function(o, ks){ for (var i=0;i<ks.length;i++){ var v=o[ks[i]]; if (v!=null && v!=='' && !isNaN(parseFloat(v))) return parseFloat(v); } return 0; };
+    var by = {}, byCost = {};
+    (Array.isArray(rows) ? rows : []).forEach(function (row) {
+      if (row.sub3 != null) { by[String(row.sub3)] = parseInt(row['convtype' + pType]) || 0; byCost[String(row.sub3)] = pickNum(row, ['cost','total_cost','spend','ad_cost']); }
+    });
+    camps.forEach(function (c) {
+      c._sales = by[String(c.id)] || 0;
+      /* GASTO pelo RedTrack (R$ -> US$), mesma fonte/fuso das vendas. Senao, mantem o do Meta. */
+      var rc = byCost[String(c.id)] || 0;
+      if (rc > 0) c._spendToday = rc / fx;
+    });
   } else {
     camps.forEach(function (c) { c._sales = 0; });
   }

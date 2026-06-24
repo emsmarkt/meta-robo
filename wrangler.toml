@@ -17,15 +17,20 @@ RT_ICTYPE = "2"
 R_DAYGOOD = "1.6"      # humor do dia: ROAS combinado >= isso = dia BOM
 R_DAYOK = "1.2"        # entre R_DAYOK e R_DAYGOOD = NORMAL; abaixo = RUIM
 R_MINSPEND = "100"     # (reservado)
-R_FLOOR = "100"        # piso de orcamento diario (US$)
+R_FLOOR = "85"         # piso de orcamento diario (US$) — valor do CORTAR
 R_CPATARGET = "175"    # teto de CPA = META de ROAS (175 -> 1.5)
 R_CPAROPE = "195"      # teto extra em dia BOM p/ quem ja vende (2+)
 R_MINROAS = "1.4"      # ROAS minimo: entre 1.4 e a meta -> LIMITA; abaixo -> corta $100
 R_CUTNOSALE = "120"    # gastou >= isso e 0 venda -> piso
 R_EXCROAS = "2.0"      # excepcional: ROAS >= isso ...
 R_EXCMINSALES = "3"    # ... com pelo menos N vendas -> escalar
-R_SCALEMULT = "5"      # multiplicador de escala
+R_SCALEMULT = "5"      # multiplicador de escala (ROAS excelente >=2)
+R_AUMROASLOW = "1.5"   # faixa ROAS bom: inicio
+R_AUMROASHIGH = "1.9"  # faixa ROAS bom: fim
+R_AUMPCTLOW = "0.30"   # +30% no ROAS 1.5
+R_AUMPCTHIGH = "0.70"  # +70% no ROAS 1.9
 R_SCALEUSEPCT = "0.2"  # so escala se gasto hoje >= isso do diario atual
 R_RELEASE = "500"      # campanha que vende mas esta limitada -> libera p/ esse valor
 R_ALERT3DROAS = "1.0"  # aviso "matar": ROAS dos 3 dias < isso
 R_ALERT3DSPEND = "150" # so avisa se gastou >= isso nos 3 dias
+R_FX = "5.1"           # cambio R$/US$ p/ converter o custo do RedTrack em dolar
