@@ -11,7 +11,7 @@ var DIAG = {}; // diagnostico da ultima coleta (aparece no /run)
 /* Config das regras — padroes (iguais ao dashboard). Podem ser sobrescritos por VARIAVEIS
    do Cloudflare (R_*), pra ajustar sem mexer no codigo. Veja buildRules(env). */
 var RULES = {
-  dayGood: 1.6, dayOk: 1.2,
+  dayGood: 1.5, dayOk: 1.3,
   minSpendJudge: 100, floorDaily: 85,
   cpaTarget: 175, cpaRopeGood: 190, minRoas: 1.3, minRoasNormal: 1.4, minRoasBad: 1.5, cutDays: 364,
   cutNoSaleSpend: 110,
@@ -23,7 +23,7 @@ var RULES = {
 function buildRules(env) {
   var n = function(k, d) { var v = env && env[k]; var f = parseFloat(v); return (v !== undefined && v !== '' && !isNaN(f)) ? f : d; };
   return {
-    dayGood: n('R_DAYGOOD', 1.6), dayOk: n('R_DAYOK', 1.2),
+    dayGood: n('R_DAYGOOD', 1.5), dayOk: n('R_DAYOK', 1.3),
     minSpendJudge: n('R_MINSPEND', 100), floorDaily: n('R_FLOOR', 85), cutDays: n('R_CUTDAYS', 364),
     cpaTarget: n('R_CPATARGET', 175), cpaRopeGood: n('R_CPAROPE', 190),
     minRoas: n('R_MINROAS', 1.3), minRoasNormal: n('R_MINROASNORMAL', 1.4), minRoasBad: n('R_MINROASBAD', 1.5),
