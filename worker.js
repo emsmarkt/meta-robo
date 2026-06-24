@@ -6,6 +6,7 @@
 
 var API = 'https://graph.facebook.com/v21.0';
 var RT_API = 'https://api.redtrack.io';
+var DIAG = {}; // diagnostico da ultima coleta (aparece no /run)
 
 /* Config das regras — padroes (iguais ao dashboard). Podem ser sobrescritos por VARIAVEIS
    do Cloudflare (R_*), pra ajustar sem mexer no codigo. Veja buildRules(env). */
@@ -163,11 +164,16 @@ async function collect(env) {
   }
 
   // vendas de hoje (RedTrack, por sub3 = campaign_id)
+  DIAG = { rtTokenSet: !!env.RT_TOKEN, metaTokens: JSON.parse(env.META_TOKENS || '[]').length, today: brDatePlus(0), fx: parseFloat(env.R_FX) || 5.1, camps: camps.length };
   if (env.RT_TOKEN) {
     var pType = env.RT_PTYPE || '1';
     var url = RT_API + '/report?api_key=' + encodeURIComponent(env.RT_TOKEN) + '&group=sub3&date_from=' + brDatePlus(0) + '&date_to=' + brDatePlus(0) + '&per=1000';
     var d = await fj(url).catch(function () { return {}; });
     var rows = d.items || d.data || d.report || (Array.isArray(d) ? d : []);
+    DIAG.rtRows = Array.isArray(rows) ? rows.length : 0;
+    DIAG.rtError = (d && d.error) ? (d.error.message || JSON.stringify(d.error)) : null;
+    DIAG.rtSampleKeys = (Array.isArray(rows) && rows[0]) ? Object.keys(rows[0]).slice(0, 25).join(',') : '';
+    DIAG.rtSampleSub3 = (Array.isArray(rows) && rows[0]) ? rows[0].sub3 : null;
     var fx = parseFloat(env.R_FX) || 5.1;
     var pickNum = function(o, ks){ for (var i=0;i<ks.length;i++){ var v=o[ks[i]]; if (v!=null && v!=='' && !isNaN(parseFloat(v))) return parseFloat(v); } return 0; };
     var by = {}, byCost = {};
@@ -228,7 +234,7 @@ async function run(env) {
       }
     }
   }
-  var log = { at: new Date().toISOString(), mode: env.APPLY_MODE || 'dry', mood: moodObj.mood, moodRoas: +moodObj.roas.toFixed(2), count: camps.length, actions: actions };
+  var log = { at: new Date().toISOString(), mode: env.APPLY_MODE || 'dry', mood: moodObj.mood, moodRoas: +moodObj.roas.toFixed(2), count: camps.length, diag: DIAG, actions: actions };
   try { await env.RULES_KV.put('lastRun', JSON.stringify(log)); } catch (e) {}
   return log;
 }
