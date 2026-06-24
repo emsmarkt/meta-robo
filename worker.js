@@ -100,14 +100,14 @@ function suggestRule(c, mood) {
     if (sp >= RULES.cutNoSaleSpend) { target = RULES.floorDaily; action = 'CORTAR_100_SEM_VENDA'; key = 'CORTAR'; }
     else { action = 'COLETANDO'; key = 'COLETANDO'; }
   } else if (cpa <= ceiling) {
-    var cur = currentDailyOf(c);
-    var baseDaily = cur > 0 ? cur : (rem > 0 ? Math.max(RULES.floorDaily, rem / 30) : RULES.floorDaily);
+    /* Base = GASTO REAL de hoje (nao o ritmo teorico saldo/dias, que gera escala absurda). */
+    var baseDaily = Math.max(sp, RULES.floorDaily);
     var excellent = (roas >= RULES.excRoas) || (sp < 1 && sales > 0);
     if (excellent) { target = baseDaily * RULES.scaleMult; action = 'ESCALAR'; key = 'ESCALAR'; }
     else {
       var pct = Math.max(RULES.aumPctLow, Math.min(RULES.aumPctHigh, RULES.aumPctLow + (roas - RULES.aumRoasLow) / (RULES.aumRoasHigh - RULES.aumRoasLow) * (RULES.aumPctHigh - RULES.aumPctLow)));
       var formula = Math.max(RULES.floorDaily, sales * RULES.cpaTarget * (1 + pct));
-      if (formula > cur) { target = formula; action = 'AUMENTAR_PROPORCIONAL'; key = 'AUMENTAR'; }
+      if (formula > sp) { target = formula; action = 'AUMENTAR_PROPORCIONAL'; key = 'AUMENTAR'; }
       else { action = 'MANTER'; key = 'MANTER'; }
     }
   } else if (roas >= RULES.minRoas) {
