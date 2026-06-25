@@ -13,7 +13,7 @@ var DIAG = {}; // diagnostico da ultima coleta (aparece no /run)
 var RULES = {
   dayGood: 1.6, dayOk: 1.2,
   minSpendJudge: 100, floorDaily: 85,
-  cpaTarget: 175, cpaRopeGood: 190, minRoas: 1.5, minRoasGood: 1.3, cutDays: 364,
+  cpaTarget: 175, cpaRopeGood: 190, minRoas: 1.3, cutDays: 364,
   cutNoSaleSpend: 110,
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70,
@@ -26,7 +26,7 @@ function buildRules(env) {
     dayGood: n('R_DAYGOOD', 1.6), dayOk: n('R_DAYOK', 1.2),
     minSpendJudge: n('R_MINSPEND', 100), floorDaily: n('R_FLOOR', 85), cutDays: n('R_CUTDAYS', 364),
     cpaTarget: n('R_CPATARGET', 175), cpaRopeGood: n('R_CPAROPE', 190),
-    minRoas: n('R_MINROAS', 1.5), minRoasGood: n('R_MINROASGOOD', 1.3),
+    minRoas: n('R_MINROAS', 1.3),
     cutNoSaleSpend: n('R_CUTNOSALE', 110),
     excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 12),
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70),
@@ -97,7 +97,7 @@ function suggestRule(c, mood) {
   var rem = remainingOf(c);
   var ceiling = (mood === 'good' && sales >= 2) ? RULES.cpaRopeGood : RULES.cpaTarget;
   /* ROAS minimo aceitavel: <=2 vendas -> 1.3; 3+ vendas -> 1.3 (bom)/1.4 (normal)/1.5 (ruim). */
-  var cutFloor = (mood === 'good' && sales > 2) ? RULES.minRoasGood : RULES.minRoas;
+  var cutFloor = RULES.minRoas; /* 1.3 fixo, independente do dia/vendas */
   /* CORTAR = empurra termino p/ +cutDays (364). diario = saldo/364 -> newEnd = +364. */
   var cortarTarget = rem > 0 ? (rem / RULES.cutDays) : RULES.floorDaily;
   var target = null, action = '', key = '';
