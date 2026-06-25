@@ -15,22 +15,21 @@ id = "62fa6d5180d6403f81a5485e1e77d5ea"
 # Variaveis (texto). Os SECRETS (META_TOKENS e RT_TOKEN) sao adicionados
 # no painel do Cloudflare (Settings -> Variaveis e segredos), NUNCA no Git.
 [vars]
-APPLY_MODE = "live"
+APPLY_MODE = "dry"
 RT_PTYPE = "1"
 RT_ICTYPE = "2"
 
 # ----- Parametros das REGRAS (edite aqui ou no painel do Cloudflare; tudo em texto) -----
-R_DAYGOOD = "1.5"      # humor do dia: ROAS combinado >= isso = dia BOM
-R_DAYOK = "1.3"        # entre R_DAYOK e R_DAYGOOD = NORMAL; abaixo = RUIM
+R_DAYGOOD = "1.6"      # humor do dia: ROAS combinado >= isso = dia BOM
+R_DAYOK = "1.2"        # entre R_DAYOK e R_DAYGOOD = NORMAL; abaixo = RUIM
 R_MINSPEND = "100"     # (reservado)
 R_FLOOR = "85"         # piso de orcamento diario (US$) — valor do CORTAR
 R_CUTDAYS = "364"      # CORTAR empurra o termino p/ daqui X dias (limite FB e 365)
 R_CPATARGET = "175"    # teto de CPA = META de ROAS (175 -> 1.5)
 R_CPAROPE = "190"      # teto extra em dia BOM p/ quem ja vende (2+)
-R_MINROAS = "1.3"      # ROAS min: <=2 vendas, e 3+ vendas em dia BOM
-R_MINROASNORMAL = "1.4" # 3+ vendas em dia NORMAL
-R_MINROASBAD = "1.5"   # 3+ vendas em dia RUIM
-R_CUTNOSALE = "110"    # gastou >= isso e 0 venda -> piso
+R_MINROAS = "1.5"      # ROAS min padrao (dias normais/ruins, e dia bom com <=2 vendas)
+R_MINROASGOOD = "1.3"  # ROAS min em dia BOM p/ campanhas com 3+ vendas
+R_CUTNOSALE = "120"    # gastou >= isso e 0 venda -> piso
 R_EXCROAS = "2.0"      # excepcional: ROAS >= isso ...
 R_EXCMINSALES = "3"    # ... com pelo menos N vendas -> escalar
 R_SCALEMULT = "12"     # multiplicador de escala (12x o gasto de hoje; range util 10-15)
