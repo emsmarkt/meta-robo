@@ -2,7 +2,7 @@ name = "meta-robo"
 main = "worker.js"
 compatibility_date = "2026-01-01"
 
-# Roda a cada 5 minutos (em modo "dry" só calcula, nao aplica)
+# Roda a cada 5 minutos. APPLY_MODE="live" aplica de verdade; "dry" só calcula/loga.
 [triggers]
 crons = ["*/5 * * * *"]
 
@@ -27,9 +27,13 @@ R_FLOOR = "85"         # piso de orcamento diario (US$) — valor do CORTAR
 R_CUTDAYS = "364"      # CORTAR empurra o termino p/ daqui X dias (limite FB e 365)
 R_CPATARGET = "175"    # teto de CPA = META de ROAS (175 -> 1.5)
 R_CPAROPE = "190"      # teto extra em dia BOM p/ quem ja vende (2+)
-R_MINROAS = "1.5"      # ROAS min padrao (dias normais/ruins, e dia bom com <=2 vendas)
-R_MINROASGOOD = "1.3"  # ROAS min em dia BOM p/ campanhas com 3+ vendas
-R_CUTNOSALE = "120"    # gastou >= isso e 0 venda -> piso
+R_MINROAS = "1.3"      # abaixo disso -> CORTAR (+364 dias), independente do dia. 1.3-piso -> LIMITA
+# Piso de ROAS p/ "ganhar" (so no ramo de ATE 5 vendas; acima = vencedora/nao reduz):
+R_ACCBASE = "1.5"        # piso padrao (<=2 vendas, ou >2 vendas em dia nao-bom)
+R_ACCGOOD = "1.35"       # piso em dia BOM com >2 vendas
+R_ACCGOODMINSALES = "2"  # regra do piso BOM = sales > este valor (ou seja, >2 vendas)
+R_AUMMAXSALES = "5"    # campanhas com MAIS de 5 vendas: so CORTA se ROAS < R_MINROAS; >=R_EXCROAS escala; no meio MANTEM (nunca LIMITA/AUMENTA)
+R_CUTNOSALE = "90"     # gastou >= isso e 0 venda -> piso
 R_EXCROAS = "2.0"      # excepcional: ROAS >= isso ...
 R_EXCMINSALES = "3"    # ... com pelo menos N vendas -> escalar
 R_SCALEMULT = "12"     # multiplicador de escala (12x o gasto de hoje; range util 10-15)
