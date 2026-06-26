@@ -338,8 +338,35 @@ export default {
       return jsonResp(m);
     }
 
-    /* Historico append-only do robo (lista RICA acumulada). So tem dados em APPLY_MODE=live. */
+    /* Historico append-only COMPARTILHADO (lista RICA acumulada). Tem entradas do robo
+       (source:'robo', so em APPLY_MODE=live) e MANUAIS (source:'manual') vindas do dashboard. */
     if (path === '/history') {
+      if (request.method === 'POST') {
+        /* Grava uma entrada MANUAL enviada pelo dashboard (todos os dispositivos veem). */
+        var hb = {}; try { hb = await request.json(); } catch (e) {}
+        if (!hb || !hb.id) return jsonResp({ ok: false, err: 'sem id' });
+        var hlog = []; try { var hpost = await env.RULES_KV.get('histLog'); if (hpost) { var phPost = JSON.parse(hpost); if (Array.isArray(phPost)) hlog = phPost; } } catch (e) {}
+        /* Entrada normalizada: preserva campos ricos do cliente, mas FORCA source:'manual'. */
+        var entry = {
+          id: hb.id, name: hb.name || ('#' + hb.id),
+          t: (typeof hb.t === 'number' && hb.t > 0) ? hb.t : Date.now(),
+          day: hb.day || brDatePlus(0),
+          sig: hb.sig || '', action: hb.action || '',
+          roas: hb.roas, sales: hb.sales, spend: hb.spend,
+          dailyOld: (typeof hb.dailyOld === 'number') ? hb.dailyOld : null,
+          dailyNew: (typeof hb.dailyNew === 'number') ? hb.dailyNew : null,
+          endOld: hb.endOld || null, endNew: hb.endNew || null,
+          source: 'manual'
+        };
+        /* Dedup defensivo contra reenvio: mesmo id+t+sig ja existe? Nao duplica. */
+        var dup = false;
+        for (var di = 0; di < hlog.length; di++) {
+          var he = hlog[di];
+          if (he && String(he.id) === String(entry.id) && he.t === entry.t && (he.sig || '') === entry.sig) { dup = true; break; }
+        }
+        if (!dup) { hlog.unshift(entry); if (hlog.length > 500) hlog = hlog.slice(0, 500); try { await env.RULES_KV.put('histLog', JSON.stringify(hlog)); } catch (e) {} }
+        return jsonResp({ ok: true });
+      }
       var hist = []; try { var hs = await env.RULES_KV.get('histLog'); if (hs) { var ph2 = JSON.parse(hs); if (Array.isArray(ph2)) hist = ph2; } } catch (e) {}
       return jsonResp(hist);
     }
