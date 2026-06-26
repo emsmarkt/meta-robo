@@ -16,7 +16,7 @@ var RULES = {
   cpaTarget: 175, cpaRopeGood: 190, minRoas: 1.3, cutDays: 364,
   cutNoSaleSpend: 110,
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
-  aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70,
+  aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
   alert3dRoas: 1.0, alert3dMinSpend: 150
 };
 /* Le os parametros das variaveis do Cloudflare (se existirem), senao usa o padrao acima. */
@@ -29,7 +29,7 @@ function buildRules(env) {
     minRoas: n('R_MINROAS', 1.3),
     cutNoSaleSpend: n('R_CUTNOSALE', 110),
     excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 12),
-    aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70),
+    aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70), aumMaxSales: n('R_AUMMAXSALES', 5),
     scaleUsePct: n('R_SCALEUSEPCT', 0.2), releaseDaily: n('R_RELEASE', 500),
     alert3dRoas: n('R_ALERT3DROAS', 1.0), alert3dMinSpend: n('R_ALERT3DSPEND', 150)
   };
@@ -109,6 +109,10 @@ function suggestRule(c, mood) {
     var baseDaily = Math.max(sp, RULES.floorDaily);
     var excellent = (roas >= RULES.excRoas) || (sp < 1 && sales > 0);
     if (excellent) { target = baseDaily * RULES.scaleMult; action = 'ESCALAR'; key = 'ESCALAR'; }
+    else if (sales > RULES.aumMaxSales) {
+      /* ROAS 1.5-1.9 com mais de 5 vendas: ja tem volume -> nao entra na regra (nunca reduz). MANTER. */
+      action = 'MANTER_VOLUME'; key = 'MANTER';
+    }
     else {
       var pct = Math.max(RULES.aumPctLow, Math.min(RULES.aumPctHigh, RULES.aumPctLow + (roas - RULES.aumRoasLow) / (RULES.aumRoasHigh - RULES.aumRoasLow) * (RULES.aumPctHigh - RULES.aumPctLow)));
       var formula = Math.max(RULES.floorDaily, sales * RULES.cpaTarget * (1 + pct));
