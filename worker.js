@@ -14,6 +14,9 @@ var RULES = {
   dayGood: 1.6, dayOk: 1.2,
   minSpendJudge: 100, floorDaily: 85,
   cpaTarget: 175, cpaRopeGood: 190, minRoas: 1.3, cutDays: 364,
+  /* PISO de ROAS p/ "ganhar" (so no ramo de ATE 5 vendas): <=2 vendas -> accBase(1.5);
+     >2 vendas E dia BOM -> accGood(1.35); >2 vendas dia nao-bom -> accBase(1.5). */
+  accBase: 1.5, accGood: 1.35, accGoodMinSales: 2,
   cutNoSaleSpend: 110,
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
@@ -27,6 +30,7 @@ function buildRules(env) {
     minSpendJudge: n('R_MINSPEND', 100), floorDaily: n('R_FLOOR', 85), cutDays: n('R_CUTDAYS', 364),
     cpaTarget: n('R_CPATARGET', 175), cpaRopeGood: n('R_CPAROPE', 190),
     minRoas: n('R_MINROAS', 1.3),
+    accBase: n('R_ACCBASE', 1.5), accGood: n('R_ACCGOOD', 1.35), accGoodMinSales: n('R_ACCGOODMINSALES', 2),
     cutNoSaleSpend: n('R_CUTNOSALE', 110),
     excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 12),
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70), aumMaxSales: n('R_AUMMAXSALES', 5),
@@ -91,12 +95,18 @@ function computeMood(camps) {
   return { roas: r, mood: r >= RULES.dayGood ? 'good' : (r >= RULES.dayOk ? 'normal' : 'bad') };
 }
 function suggestRule(c, mood) {
+  /* TESTE — fora das regras: nome com "TESTE" nunca recebe corte/escala/limite.
+     target/newEnd null garante que o bloco de apply em run() (gate r.newEnd && r.key) nao aplica. */
+  if ((c.name || '').toUpperCase().indexOf('TESTE') >= 0) {
+    return { action: 'TESTE_FORA_DAS_REGRAS', key: 'TESTE', target: null, newEnd: null, cpa: Infinity, roas: 0, sales: c._sales || 0, spend: c._spendToday || 0 };
+  }
   var sp = c._spendToday || 0, sales = c._sales || 0;
   var roas = sp > 0 ? (sales * 260) / sp : 0;
   var cpa = sales > 0 ? sp / sales : Infinity;
   var rem = remainingOf(c);
-  var ceiling = (mood === 'good' && sales >= 2) ? RULES.cpaRopeGood : RULES.cpaTarget;
-  /* ROAS minimo aceitavel: <=2 vendas -> 1.3; 3+ vendas -> 1.3 (bom)/1.4 (normal)/1.5 (ruim). */
+  /* PISO de ROAS p/ "ganhar" (so no ramo de ATE 5 vendas): accBase(1.5) por padrao;
+     accGood(1.35) em dia BOM com >2 vendas. Acima = vencedora; 1.3..piso = LIMITAR; <1.3 = CORTAR. */
+  var minAcc = (mood === 'good' && sales > RULES.accGoodMinSales) ? RULES.accGood : RULES.accBase;
   var cutFloor = RULES.minRoas; /* 1.3 fixo, independente do dia/vendas */
   /* CORTAR = empurra termino p/ +cutDays (364). diario = saldo/364 -> newEnd = +364. */
   var cortarTarget = rem > 0 ? (rem / RULES.cutDays) : RULES.floorDaily;
@@ -110,7 +120,8 @@ function suggestRule(c, mood) {
     if (roas < cutFloor) { target = cortarTarget; action = 'CORTAR_TERMINO_364_ROAS_BAIXO'; key = 'CORTAR'; }
     else if (roas >= RULES.excRoas || (sp < 1 && sales > 0)) { var baseDailyV = Math.max(sp, RULES.floorDaily); target = baseDailyV * RULES.scaleMult; action = 'ESCALAR'; key = 'ESCALAR'; }
     else { action = 'MANTER_VOLUME'; key = 'MANTER'; }
-  } else if (cpa <= ceiling) {
+  } else if (roas >= minAcc) {
+    /* VENCEDORA: ROAS >= piso aceitavel (accBase 1.5, ou accGood 1.35 em dia BOM com >2 vendas). */
     /* Base = GASTO REAL de hoje (nao o ritmo teorico saldo/dias, que gera escala absurda). */
     var baseDaily = Math.max(sp, RULES.floorDaily);
     var excellent = (roas >= RULES.excRoas) || (sp < 1 && sales > 0);
@@ -304,7 +315,8 @@ async function run(env) {
           sig: r.key, action: r.action,
           roas: +r.roas.toFixed(2), sales: r.sales, spend: Math.round(r.spend),
           dailyNew: r.target != null ? Math.round(r.target) : null, endNew: r.newEnd,
-          source: 'robo'
+          source: 'robo',
+          tkId: (c._tk ? String(c._tk).slice(-6) : '') /* id CURTO do token p/ filtro por estrutura no dashboard */
         });
         if (histLog.length > 500) histLog = histLog.slice(0, 500);
         histDirty = true;
