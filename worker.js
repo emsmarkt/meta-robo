@@ -104,15 +104,17 @@ function suggestRule(c, mood) {
   if (sales === 0) {
     if (sp >= RULES.cutNoSaleSpend) { target = cortarTarget; action = 'CORTAR_TERMINO_364_SEM_VENDA'; key = 'CORTAR'; }
     else { action = 'COLETANDO'; key = 'COLETANDO'; }
+  } else if (sales > RULES.aumMaxSales) {
+    /* CAMPANHA COM VOLUME (>5 vendas): so REDUZ orcamento se ROAS < 1,3 (corte). ROAS >= 2,0
+       (ou vende sem gasto hoje) ainda ESCALA. Entre 1,3 e 2,0 -> MANTER. Nunca LIMITAR/AUMENTAR. */
+    if (roas < cutFloor) { target = cortarTarget; action = 'CORTAR_TERMINO_364_ROAS_BAIXO'; key = 'CORTAR'; }
+    else if (roas >= RULES.excRoas || (sp < 1 && sales > 0)) { var baseDailyV = Math.max(sp, RULES.floorDaily); target = baseDailyV * RULES.scaleMult; action = 'ESCALAR'; key = 'ESCALAR'; }
+    else { action = 'MANTER_VOLUME'; key = 'MANTER'; }
   } else if (cpa <= ceiling) {
     /* Base = GASTO REAL de hoje (nao o ritmo teorico saldo/dias, que gera escala absurda). */
     var baseDaily = Math.max(sp, RULES.floorDaily);
     var excellent = (roas >= RULES.excRoas) || (sp < 1 && sales > 0);
     if (excellent) { target = baseDaily * RULES.scaleMult; action = 'ESCALAR'; key = 'ESCALAR'; }
-    else if (sales > RULES.aumMaxSales) {
-      /* ROAS 1.5-1.9 com mais de 5 vendas: ja tem volume -> nao entra na regra (nunca reduz). MANTER. */
-      action = 'MANTER_VOLUME'; key = 'MANTER';
-    }
     else {
       var pct = Math.max(RULES.aumPctLow, Math.min(RULES.aumPctHigh, RULES.aumPctLow + (roas - RULES.aumRoasLow) / (RULES.aumRoasHigh - RULES.aumRoasLow) * (RULES.aumPctHigh - RULES.aumPctLow)));
       var formula = Math.max(RULES.floorDaily, sales * RULES.cpaTarget * (1 + pct));
