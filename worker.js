@@ -276,6 +276,9 @@ async function run(env) {
      na faixa). Se ela MUDAR de regra (ex: vira ESCALAR) e DEPOIS voltar pra LIMITAR, reaplica,
      porque a ultima aplicada passou a ser ESCALAR. Reseta no dia seguinte. */
   var appliedMap = {}; try { var am = await env.RULES_KV.get('applied'); if (am) appliedMap = JSON.parse(am); } catch (e) {}
+  /* Historico append-only do robo (lista RICA, cap 500). So cresce quando aplica de verdade (live). */
+  var histLog = []; try { var hl = await env.RULES_KV.get('histLog'); if (hl) { var ph = JSON.parse(hl); if (Array.isArray(ph)) histLog = ph; } } catch (e) {}
+  var histDirty = false;
   var appliedDirty = false, today = brDatePlus(0);
   var actions = [];
   for (var i = 0; i < camps.length; i++) {
@@ -293,10 +296,21 @@ async function run(env) {
         try { await env.RULES_KV.put(ck, String(Date.now())); } catch (e) {}
         appliedMap[c.id] = { sig: r.key, action: r.action, t: Date.now(), day: today };
         appliedDirty = true;
+        /* Append RICO no historico do robo (cap 500, mais novo no topo). */
+        histLog.unshift({
+          id: c.id, name: c.name, t: Date.now(), day: today,
+          sig: r.key, action: r.action,
+          roas: +r.roas.toFixed(2), sales: r.sales, spend: Math.round(r.spend),
+          dailyNew: r.target != null ? Math.round(r.target) : null, endNew: r.newEnd,
+          source: 'robo'
+        });
+        if (histLog.length > 500) histLog = histLog.slice(0, 500);
+        histDirty = true;
       }
     }
   }
   if (appliedDirty) { try { await env.RULES_KV.put('applied', JSON.stringify(appliedMap)); } catch (e) {} }
+  if (histDirty) { try { await env.RULES_KV.put('histLog', JSON.stringify(histLog)); } catch (e) {} }
   var log = { at: new Date().toISOString(), mode: env.APPLY_MODE || 'dry', mood: moodObj.mood, moodRoas: +moodObj.roas.toFixed(2), count: camps.length, diag: DIAG, actions: actions };
   try { await env.RULES_KV.put('lastRun', JSON.stringify(log)); } catch (e) {}
   return log;
@@ -322,6 +336,12 @@ export default {
       }
       var m = {}; try { var s2 = await env.RULES_KV.get('applied'); if (s2) m = JSON.parse(s2); } catch (e) {}
       return jsonResp(m);
+    }
+
+    /* Historico append-only do robo (lista RICA acumulada). So tem dados em APPLY_MODE=live. */
+    if (path === '/history') {
+      var hist = []; try { var hs = await env.RULES_KV.get('histLog'); if (hs) { var ph2 = JSON.parse(hs); if (Array.isArray(ph2)) hist = ph2; } } catch (e) {}
+      return jsonResp(hist);
     }
 
     if (path === '/run') { var r = await run(env); return jsonResp(r); }
