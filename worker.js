@@ -57,13 +57,24 @@ function fjPaged(url) {
   }
   return go(url);
 }
-function postForm(id, tk, params) {
+function postForm(id, tk, params, _try) {
+  _try = _try || 0;
   var body = new URLSearchParams();
   Object.keys(params).forEach(function (k) { body.append(k, params[k]); });
   body.append('access_token', tk);
   return fetch(API + '/' + id, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
     .then(function (r) { return r.json(); })
-    .then(function (d) { if (d.error) throw new Error(d.error.message); return d; });
+    .then(function (d) {
+      if (d.error) {
+        /* Erro transitorio do Meta ("unexpected error / retry later", code 2) -> 1 retry curto
+           (1s). O cron de 5 min ja serve de retry maior; nao estouramos o tempo do Worker. */
+        var msg = d.error.message || '';
+        var transient = d.error.is_transient || d.error.code === 2 || /unexpected error|please (?:retry|try again)|temporar/i.test(msg);
+        if (transient && _try < 1) { return new Promise(function (res) { setTimeout(res, 1000); }).then(function () { return postForm(id, tk, params, _try + 1); }); }
+        throw new Error(msg);
+      }
+      return d;
+    });
 }
 /* fallback de token: tenta o preferido e cai pros outros */
 function withTokenFallback(toks, preferred, fn) {
@@ -263,8 +274,8 @@ async function collect(env) {
 async function applyChange(c, tokens, newEnd) {
   var endIso = newEnd + 'T23:59:00-03:00';
   var endTs = Math.floor(new Date(endIso).getTime() / 1000);
+  /* So o stop_time muda o ritmo da CBO; NAO reenviamos lifetime_budget (redundante e gatilho de erro). */
   var campParams = { stop_time: String(endTs) };
-  if (c.lifetime_budget) campParams.lifetime_budget = String(c.lifetime_budget);
   await withTokenFallback(tokens, c._tk, function (tk) { return postForm(c.id, tk, campParams); }).catch(function () {});
   var setsR = await withTokenFallback(tokens, c._tk, function (tk) { return fj(API + '/' + c.id + '/adsets?fields=id&limit=200&access_token=' + tk).then(function (r) { if (r.error) throw new Error(r.error.message); return r; }); }).catch(function () { return { result: {} }; });
   var sets = (setsR.result && setsR.result.data) || [];
