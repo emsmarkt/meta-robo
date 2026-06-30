@@ -20,7 +20,8 @@ var RULES = {
   cutNoSaleSpend: 90,
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
-  alert3dRoas: 1.0, alert3dMinSpend: 150
+  alert3dRoas: 1.0, alert3dMinSpend: 150,
+  cooldownMin: 30      // minutos entre 2 aplicacoes na MESMA campanha (configuravel via R_COOLDOWN). Em teste: 30
 };
 /* Le os parametros das variaveis do Cloudflare (se existirem), senao usa o padrao acima. */
 function buildRules(env) {
@@ -35,7 +36,8 @@ function buildRules(env) {
     excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 12),
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70), aumMaxSales: n('R_AUMMAXSALES', 5),
     scaleUsePct: n('R_SCALEUSEPCT', 0.2), releaseDaily: n('R_RELEASE', 500),
-    alert3dRoas: n('R_ALERT3DROAS', 1.0), alert3dMinSpend: n('R_ALERT3DSPEND', 150)
+    alert3dRoas: n('R_ALERT3DROAS', 1.0), alert3dMinSpend: n('R_ALERT3DSPEND', 150),
+    cooldownMin: n('R_COOLDOWN', 30)
   };
 }
 
@@ -315,7 +317,7 @@ async function run(env) {
       var sameAsLast = prev && prev.day === today && prev.sig === r.key; // a ULTIMA aplicada hoje ja foi essa mesma regra -> nao repete (mas reaplica se mudou e voltou)
       var ck = 'cd:' + c.id, last = 0;
       try { last = parseInt(await env.RULES_KV.get(ck)) || 0; } catch (e) {}
-      if (!sameAsLast && (Date.now() - last >= 60 * 60 * 1000)) {
+      if (!sameAsLast && (Date.now() - last >= RULES.cooldownMin * 60 * 1000)) {
         await applyChange(c, tokens, r.newEnd);
         try { await env.RULES_KV.put(ck, String(Date.now())); } catch (e) {}
         appliedMap[c.id] = { sig: r.key, action: r.action, t: Date.now(), day: today };
