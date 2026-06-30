@@ -123,6 +123,7 @@ function suggestRule(c, mood) {
   var cutFloor = RULES.minRoas; /* 1.3 fixo, independente do dia/vendas */
   /* CORTAR = empurra termino p/ +cutDays (364). diario = saldo/364 -> newEnd = +364. */
   var cortarTarget = rem > 0 ? (rem / RULES.cutDays) : RULES.floorDaily;
+  var curDaily = currentDailyOf(c); /* ritmo diario atual: ESCALAR/AUMENTAR NUNCA pode reduzir isso */
   var target = null, action = '', key = '';
   if (sales === 0) {
     if (sp >= RULES.cutNoSaleSpend) { target = cortarTarget; action = 'CORTAR_TERMINO_364_SEM_VENDA'; key = 'CORTAR'; }
@@ -131,18 +132,18 @@ function suggestRule(c, mood) {
     /* CAMPANHA COM VOLUME (>5 vendas): so REDUZ orcamento se ROAS < 1,3 (corte). ROAS >= 2,0
        (ou vende sem gasto hoje) ainda ESCALA. Entre 1,3 e 2,0 -> MANTER. Nunca LIMITAR/AUMENTAR. */
     if (roas < cutFloor) { target = cortarTarget; action = 'CORTAR_TERMINO_364_ROAS_BAIXO'; key = 'CORTAR'; }
-    else if (roas >= RULES.excRoas || (sp < 1 && sales > 0)) { var baseDailyV = Math.max(sp, RULES.floorDaily); target = baseDailyV * RULES.scaleMult; action = 'ESCALAR'; key = 'ESCALAR'; }
+    else if (roas >= RULES.excRoas || (sp < 1 && sales > 0)) { var escV = Math.max(sp, RULES.floorDaily) * RULES.scaleMult; if (curDaily > 0 && escV <= curDaily) { action = 'MANTER_JA_ESCALADA'; key = 'MANTER'; } else { target = escV; action = 'ESCALAR'; key = 'ESCALAR'; } }
     else { action = 'MANTER_VOLUME'; key = 'MANTER'; }
   } else if (roas >= minAcc) {
     /* VENCEDORA: ROAS >= piso aceitavel (accBase 1.5, ou accGood 1.35 em dia BOM com >2 vendas). */
     /* Base = GASTO REAL de hoje (nao o ritmo teorico saldo/dias, que gera escala absurda). */
     var baseDaily = Math.max(sp, RULES.floorDaily);
     var excellent = (roas >= RULES.excRoas) || (sp < 1 && sales > 0);
-    if (excellent) { target = baseDaily * RULES.scaleMult; action = 'ESCALAR'; key = 'ESCALAR'; }
+    if (excellent) { var escW = baseDaily * RULES.scaleMult; if (curDaily > 0 && escW <= curDaily) { action = 'MANTER_JA_ESCALADA'; key = 'MANTER'; } else { target = escW; action = 'ESCALAR'; key = 'ESCALAR'; } }
     else {
       var pct = Math.max(RULES.aumPctLow, Math.min(RULES.aumPctHigh, RULES.aumPctLow + (roas - RULES.aumRoasLow) / (RULES.aumRoasHigh - RULES.aumRoasLow) * (RULES.aumPctHigh - RULES.aumPctLow)));
       var formula = Math.max(RULES.floorDaily, sales * RULES.cpaTarget * (1 + pct));
-      if (formula > sp) { target = formula; action = 'AUMENTAR_PROPORCIONAL'; key = 'AUMENTAR'; }
+      if (formula > Math.max(sp, curDaily)) { target = formula; action = 'AUMENTAR_PROPORCIONAL'; key = 'AUMENTAR'; }
       else { action = 'MANTER'; key = 'MANTER'; }
     }
   } else if (roas >= cutFloor) {
