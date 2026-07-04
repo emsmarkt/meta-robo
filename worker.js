@@ -47,6 +47,26 @@ function brDatePlus(days) {
   d.setUTCDate(d.getUTCDate() + days);
   return d.getUTCFullYear() + '-' + ('0' + (d.getUTCMonth() + 1)).slice(-2) + '-' + ('0' + d.getUTCDate()).slice(-2);
 }
+/* Cotacao USD/BRL AO VIVO (AwesomeAPI, sem chave). Fallback: R_FX (ou 5.1) se a chamada falhar. */
+async function liveFx(env) {
+  var fb = parseFloat(env && env.R_FX) || 5.1;
+  try {
+    var r = await fetch('https://economia.awesomeapi.com.br/json/last/USD-BRL', { headers: { 'Accept': 'application/json' } });
+    var d = await r.json();
+    var rate = (d && d.USDBRL) ? parseFloat(d.USDBRL.bid) : NaN;
+    return (rate && rate > 0) ? rate : fb;
+  } catch (e) { return fb; }
+}
+/* Envia mensagem no Telegram (se TG_TOKEN e TG_CHAT existirem). Silencioso em erro. */
+async function sendTelegram(env, text) {
+  try {
+    if (!env.TG_TOKEN || !env.TG_CHAT) return;
+    await fetch('https://api.telegram.org/bot' + env.TG_TOKEN + '/sendMessage', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: env.TG_CHAT, text: text, disable_web_page_preview: true })
+    });
+  } catch (e) {}
+}
 function fj(url) { return fetch(url).then(function (r) { return r.json(); }); }
 function fjPaged(url) {
   var all = [];
@@ -233,8 +253,10 @@ async function collect(env) {
   var lifeRange = encodeURIComponent(JSON.stringify({ since: sinceLife.toISOString().split('T')[0], until: brDatePlus(0) }));
   await batchLifetimeSpend(camps, lifeRange);
 
+  // Cambio USD/BRL AO VIVO (AwesomeAPI); fallback R_FX. Converte o custo do RedTrack (R$) em US$.
+  var fx = await liveFx(env);
   // vendas de hoje (RedTrack, por sub3 = campaign_id)
-  DIAG = { rtTokenSet: !!env.RT_TOKEN, metaTokens: JSON.parse(env.META_TOKENS || '[]').length, today: brDatePlus(0), fx: parseFloat(env.R_FX) || 5.1, camps: camps.length };
+  DIAG = { rtTokenSet: !!env.RT_TOKEN, metaTokens: JSON.parse(env.META_TOKENS || '[]').length, today: brDatePlus(0), fx: fx, camps: camps.length };
   if (env.RT_TOKEN) {
     var pType = env.RT_PTYPE || '1';
     var url = RT_API + '/report?api_key=' + encodeURIComponent(env.RT_TOKEN) + '&group=sub3&date_from=' + brDatePlus(0) + '&date_to=' + brDatePlus(0) + '&per=1000';
@@ -249,7 +271,7 @@ async function collect(env) {
     DIAG.rtError = (d && d.error) ? (d.error.message || JSON.stringify(d.error)) : null;
     DIAG.rtSampleKeys = (Array.isArray(rows) && rows[0]) ? Object.keys(rows[0]).slice(0, 30).join(',') : '';
     DIAG.rtSampleSub3 = (Array.isArray(rows) && rows[0]) ? rows[0].sub3 : null;
-    var fx = parseFloat(env.R_FX) || 5.1;
+    /* fx (cambio ao vivo) ja definido no inicio da collect. */
     var pickNum = function(o, ks){ for (var i=0;i<ks.length;i++){ var v=o[ks[i]]; if (v!=null && v!=='' && !isNaN(parseFloat(v))) return parseFloat(v); } return 0; };
     var by = {}, byCost = {};
     (Array.isArray(rows) ? rows : []).forEach(function (row) {
@@ -339,6 +361,35 @@ async function run(env) {
   }
   if (appliedDirty) { try { await env.RULES_KV.put('applied', JSON.stringify(appliedMap)); } catch (e) {} }
   if (histDirty) { try { await env.RULES_KV.put('histLog', JSON.stringify(histLog)); } catch (e) {} }
+
+  /* ── ALERTAS TELEGRAM (independe do APPLY_MODE; avisa 1x por campanha/condicao por dia) ── */
+  if (env.TG_TOKEN && env.TG_CHAT) {
+    try {
+      var sent = {}; try { var ss = await env.RULES_KV.get('tgSent'); if (ss) sent = JSON.parse(ss); } catch (e) {}
+      var newSent = {}; Object.keys(sent).forEach(function (k) { if (sent[k] === today) newSent[k] = today; }); /* poda: so mantem hoje */
+      var alerts = [];
+      for (var ti = 0; ti < actions.length; ti++) {
+        var ac = actions[ti];
+        /* 1) gastou >= cutNoSaleSpend ($90) e ZERO venda */
+        if (ac.sales === 0 && ac.spend >= RULES.cutNoSaleSpend) {
+          var k1 = ac.id + ':nosale';
+          if (newSent[k1] !== today) { alerts.push('\u{1F534} SEM VENDA · $' + ac.spend + ' gastos\n' + ac.name); newSent[k1] = today; }
+        }
+        /* 2) tem venda mas ROAS <= 1,3 (na/abaixo da linha de corte) */
+        if (ac.sales >= 1 && ac.roas <= 1.3) {
+          var k2 = ac.id + ':roas13';
+          if (newSent[k2] !== today) { alerts.push('⚠️ ROAS ' + ac.roas.toFixed(2).replace('.', ',') + ' (≤1,3) · ' + ac.sales + ' venda(s) · $' + ac.spend + '\n' + ac.name); newSent[k2] = today; }
+        }
+      }
+      if (alerts.length) {
+        var show = alerts.slice(0, 25);
+        if (alerts.length > 25) show.push('…e mais ' + (alerts.length - 25) + ' campanha(s).');
+        await sendTelegram(env, '\u{1F916} Robô CBO — alertas (' + today + ')\n\n' + show.join('\n\n'));
+      }
+      try { await env.RULES_KV.put('tgSent', JSON.stringify(newSent)); } catch (e) {}
+    } catch (e) { DIAG.tgErr = String((e && e.message) || e); }
+  }
+
   var log = { at: new Date().toISOString(), mode: env.APPLY_MODE || 'dry', mood: moodObj.mood, moodRoas: +moodObj.roas.toFixed(2), count: camps.length, diag: DIAG, actions: actions };
   try { await env.RULES_KV.put('lastRun', JSON.stringify(log)); } catch (e) {}
   return log;
