@@ -14,8 +14,12 @@ id = "62fa6d5180d6403f81a5485e1e77d5ea"
 
 # Variaveis (texto). Os SECRETS (META_TOKENS e RT_TOKEN) sao adicionados
 # no painel do Cloudflare (Settings -> Variaveis e segredos), NUNCA no Git.
+# ALERTAS TELEGRAM (opcional): crie os DOIS no painel do Cloudflare ->
+#   TG_TOKEN = token do bot (do @BotFather) — adicione como SECRET.
+#   TG_CHAT  = seu chat id (do @userinfobot) — pode ser var normal.
+# Sem esses dois, os alertas ficam desligados (o resto do robo roda igual).
 [vars]
-APPLY_MODE = "live"
+APPLY_MODE = "dry"
 RT_PTYPE = "1"
 RT_ICTYPE = "2"
 
