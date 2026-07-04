@@ -21,6 +21,7 @@ var RULES = {
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
   alert3dRoas: 1.0, alert3dMinSpend: 150,
+  pauseCpc: 4, pauseSpend: 60,  // PAUSAR (status PAUSED): CPC > $4 E 0 venda E 0 IC E gasto > $60
   cooldownMin: 15      // minutos entre 2 aplicacoes na MESMA campanha (configuravel via R_COOLDOWN). Em teste: 15
 };
 /* Le os parametros das variaveis do Cloudflare (se existirem), senao usa o padrao acima. */
@@ -37,6 +38,7 @@ function buildRules(env) {
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70), aumMaxSales: n('R_AUMMAXSALES', 5),
     scaleUsePct: n('R_SCALEUSEPCT', 0.2), releaseDaily: n('R_RELEASE', 500),
     alert3dRoas: n('R_ALERT3DROAS', 1.0), alert3dMinSpend: n('R_ALERT3DSPEND', 150),
+    pauseCpc: n('R_PAUSECPC', 4), pauseSpend: n('R_PAUSESPEND', 60),
     cooldownMin: n('R_COOLDOWN', 15)
   };
 }
@@ -273,7 +275,8 @@ async function collect(env) {
     DIAG.rtSampleSub3 = (Array.isArray(rows) && rows[0]) ? rows[0].sub3 : null;
     /* fx (cambio ao vivo) ja definido no inicio da collect. */
     var pickNum = function(o, ks){ for (var i=0;i<ks.length;i++){ var v=o[ks[i]]; if (v!=null && v!=='' && !isNaN(parseFloat(v))) return parseFloat(v); } return 0; };
-    var by = {}, byCost = {};
+    var icType = env.RT_ICTYPE || '2';
+    var by = {}, byCost = {}, byClicks = {}, byIC = {};
     (Array.isArray(rows) ? rows : []).forEach(function (row) {
       if (row.sub3 != null) {
         /* Vendas = convtype{N}; se 0, cai pra 'approved' (algumas contas usam esse campo). */
@@ -281,16 +284,20 @@ async function collect(env) {
         if (!s) s = parseInt(row.approved) || 0;
         by[String(row.sub3)] = s;
         byCost[String(row.sub3)] = pickNum(row, ['cost','total_cost','spend','ad_cost']);
+        byClicks[String(row.sub3)] = pickNum(row, ['clicks']);
+        byIC[String(row.sub3)] = parseInt(row['convtype' + icType]) || 0;
       }
     });
     camps.forEach(function (c) {
       c._sales = by[String(c.id)] || 0;
+      c._clicks = byClicks[String(c.id)] || 0;
+      c._ic = byIC[String(c.id)] || 0;
       /* GASTO pelo RedTrack (R$ -> US$), mesma fonte/fuso das vendas. Senao, mantem o do Meta. */
       var rc = byCost[String(c.id)] || 0;
       if (rc > 0) c._spendToday = rc / fx;
     });
   } else {
-    camps.forEach(function (c) { c._sales = 0; });
+    camps.forEach(function (c) { c._sales = 0; c._clicks = 0; c._ic = 0; });
   }
   return camps;
 }
@@ -330,8 +337,28 @@ async function run(env) {
   var histDirty = false;
   var appliedDirty = false, today = brDatePlus(0);
   var actions = [];
+  var pausedList = []; /* campanhas pausadas neste ciclo (p/ alerta Telegram) */
   for (var i = 0; i < camps.length; i++) {
     var c = camps[i];
+    /* ── REGRA DE PAUSA: CPC > pauseCpc E 0 venda E 0 IC E gasto > pauseSpend -> PAUSA (status PAUSED) ── */
+    var pClk = c._clicks || 0, pIc = c._ic || 0, pSal = c._sales || 0, pSp = c._spendToday || 0;
+    var pCpc = pClk > 0 ? (pSp / pClk) : (pSp > 0 ? Infinity : 0);
+    var isAtiva = (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE';
+    if (isAtiva && pSal === 0 && pIc === 0 && pSp > RULES.pauseSpend && pCpc > RULES.pauseCpc) {
+      var cpcTxt = isFinite(pCpc) ? '$' + pCpc.toFixed(2) : '$' + Math.round(pSp) + ' em 0 cliques';
+      var pTxt = 'PAUSAR (CPC ' + cpcTxt + ', 0 venda/IC, $' + Math.round(pSp) + ' gastos)';
+      actions.push({ name: c.name, id: c.id, action: pTxt, key: 'PAUSAR', sales: 0, spend: Math.round(pSp), cpa: null, roas: 0 });
+      if ((env.APPLY_MODE || 'dry') === 'live') {
+        try {
+          await withTokenFallback(tokens, c._tk, function (tk) { return postForm(c.id, tk, { status: 'PAUSED' }); });
+          pausedList.push({ name: c.name, cpc: pCpc, spend: Math.round(pSp) });
+          histLog.unshift({ id: c.id, name: c.name, t: Date.now(), day: today, sig: 'PAUSAR', action: pTxt, roas: 0, sales: 0, spend: Math.round(pSp), dailyNew: null, endNew: null, source: 'robo', tkId: (c._tk ? String(c._tk).slice(-6) : '') });
+          if (histLog.length > 500) histLog = histLog.slice(0, 500);
+          histDirty = true;
+        } catch (e) {}
+      }
+      continue; /* pausou -> nao aplica regra de orcamento nesta campanha */
+    }
     var r = suggestRule(c, moodObj.mood);
     actions.push({ name: c.name, id: c.id, action: r.action, target: r.target, newEnd: r.newEnd, sales: r.sales, spend: Math.round(r.spend), cpa: isFinite(r.cpa) ? Math.round(r.cpa) : null, roas: +r.roas.toFixed(2) });
 
@@ -361,6 +388,13 @@ async function run(env) {
   }
   if (appliedDirty) { try { await env.RULES_KV.put('applied', JSON.stringify(appliedMap)); } catch (e) {} }
   if (histDirty) { try { await env.RULES_KV.put('histLog', JSON.stringify(histLog)); } catch (e) {} }
+
+  /* Alerta Telegram das campanhas PAUSADAS neste ciclo (so acontece em live). */
+  if (pausedList.length && env.TG_TOKEN && env.TG_CHAT) {
+    var pmsg = '\u{1F6D1} Robô PAUSOU ' + pausedList.length + ' campanha(s) (CPC>$' + RULES.pauseCpc + ' · 0 venda/IC · >$' + RULES.pauseSpend + '):\n\n'
+      + pausedList.map(function (p) { return '• ' + p.name + '\n   CPC ' + (isFinite(p.cpc) ? '$' + p.cpc.toFixed(2) : 'alto (0 cliques)') + ' · $' + p.spend + ' gastos'; }).join('\n\n');
+    try { await sendTelegram(env, pmsg); } catch (e) {}
+  }
 
   /* ── ALERTAS TELEGRAM (independe do APPLY_MODE; avisa 1x por campanha/condicao por dia) ── */
   if (env.TG_TOKEN && env.TG_CHAT) {
