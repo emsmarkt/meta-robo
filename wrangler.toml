@@ -19,7 +19,7 @@ id = "62fa6d5180d6403f81a5485e1e77d5ea"
 #   TG_CHAT  = seu chat id (do @userinfobot) — pode ser var normal.
 # Sem esses dois, os alertas ficam desligados (o resto do robo roda igual).
 [vars]
-APPLY_MODE = "live"
+APPLY_MODE = "dry"
 RT_PTYPE = "1"
 RT_ICTYPE = "2"
 
@@ -40,7 +40,7 @@ R_ACCBASE = "1.5"        # piso padrao (<=2 vendas, ou >2 vendas em dia nao-bom)
 R_ACCGOOD = "1.35"       # piso em dia BOM com >2 vendas
 R_ACCGOODMINSALES = "2"  # regra do piso BOM = sales > este valor (ou seja, >2 vendas)
 R_AUMMAXSALES = "5"    # campanhas com MAIS de 5 vendas: so CORTA se ROAS < R_MINROAS; >=R_EXCROAS escala; no meio MANTEM (nunca LIMITA/AUMENTA)
-R_CUTNOSALE = "90"     # gastou >= isso e 0 venda -> piso
+R_CUTNOSALE = "100"    # gastou >= isso e 0 venda -> PAUSA (e alerta Telegram). Usado tbm p/ pausa por CPC/ROAS
 R_EXCROAS = "2.0"      # excepcional: ROAS >= isso ...
 R_EXCMINSALES = "3"    # ... com pelo menos N vendas -> escalar
 R_SCALEMULT = "12"     # multiplicador de escala (12x o gasto de hoje; range util 10-15)
