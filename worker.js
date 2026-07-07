@@ -148,7 +148,14 @@ function suggestRule(c, mood) {
   var curDaily = currentDailyOf(c); /* ritmo diario atual: ESCALAR/AUMENTAR NUNCA pode reduzir isso */
   var clk = c._clicks || 0, ic = c._ic || 0;
   var cpc = clk > 0 ? (sp / clk) : (sp > 0 ? Infinity : 0);
-  /* ── PAUSAR (status PAUSED; substitui o antigo CORTAR +364d). TESTE ja saiu la em cima. ──
+  var isActive = (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE';
+  /* Campanha JA PAUSADA: nao sugere PAUSAR. Vendeu com ROAS > 1,3 -> ATIVAR (so sugestao; robo nao auto-ativa);
+     senao fica PAUSADA (sem acao). */
+  if (!isActive) {
+    if (sales >= 1 && roas > cutFloor) return { action: 'ATIVAR (ROAS ' + roas.toFixed(2) + ' > ' + cutFloor.toFixed(1) + ')', key: 'ATIVAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
+    return { action: 'PAUSADA', key: 'PAUSADA', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
+  }
+  /* ── PAUSAR (SO campanhas ATIVAS; substitui o antigo CORTAR +364d). TESTE ja saiu la em cima. ──
      A) 0 venda e gasto >= cutNoSaleSpend(100);  B) 0 venda, CPC>pauseCpc, 0 IC, gasto>pauseSpend;
      C) ROAS <= cutFloor(1,3) com venda. */
   if (sales === 0 && sp >= RULES.cutNoSaleSpend) return { action: 'PAUSAR (0 venda, $' + Math.round(sp) + ' gastos)', key: 'PAUSAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
