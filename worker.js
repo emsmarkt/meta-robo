@@ -18,6 +18,7 @@ var RULES = {
      >2 vendas E dia BOM -> accGood(1.35); >2 vendas dia nao-bom -> accBase(1.5). */
   accBase: 1.5, accGood: 1.35, accGoodMinSales: 2,
   cutNoSaleSpend: 100,
+  pauseRoas: 1.5, escRoas: 1.7, escPct: 0.30, // <=5 vd: ROAS<1,5 PAUSA; ROAS>1,7 e 3+ vd -> +30% do diario. Reativa: ROAS>1,5
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
   alert3dRoas: 1.0, alert3dMinSpend: 150,
@@ -34,6 +35,7 @@ function buildRules(env) {
     minRoas: n('R_MINROAS', 1.3),
     accBase: n('R_ACCBASE', 1.5), accGood: n('R_ACCGOOD', 1.35), accGoodMinSales: n('R_ACCGOODMINSALES', 2),
     cutNoSaleSpend: n('R_CUTNOSALE', 100),
+    pauseRoas: n('R_PAUSEROAS', 1.5), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.30),
     excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 12),
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70), aumMaxSales: n('R_AUMMAXSALES', 5),
     scaleUsePct: n('R_SCALEUSEPCT', 0.2), releaseDaily: n('R_RELEASE', 500),
@@ -149,44 +151,33 @@ function suggestRule(c, mood) {
   var clk = c._clicks || 0, ic = c._ic || 0;
   var cpc = clk > 0 ? (sp / clk) : (sp > 0 ? Infinity : 0);
   var isActive = (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE';
-  /* Campanha JA PAUSADA: nao sugere PAUSAR. Vendeu com ROAS > 1,3 -> ATIVAR (so sugestao; robo nao auto-ativa);
-     senao fica PAUSADA (sem acao). */
+  var target = null;
+  /* PAUSADA: vendeu com ROAS > pauseRoas(1,5) -> ATIVAR (so sugestao; robo NAO auto-ativa); senao PAUSADA. */
   if (!isActive) {
-    if (sales >= 1 && roas > cutFloor) return { action: 'ATIVAR (ROAS ' + roas.toFixed(2) + ' > ' + cutFloor.toFixed(1) + ')', key: 'ATIVAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
+    if (sales >= 1 && roas > RULES.pauseRoas) return { action: 'ATIVAR (ROAS ' + roas.toFixed(2) + ' > ' + RULES.pauseRoas + ')', key: 'ATIVAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
     return { action: 'PAUSADA', key: 'PAUSADA', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   }
-  /* ── PAUSAR (SO campanhas ATIVAS; substitui o antigo CORTAR +364d). TESTE ja saiu la em cima. ──
-     A) 0 venda e gasto >= cutNoSaleSpend(100);  B) 0 venda, CPC>pauseCpc, 0 IC, gasto>pauseSpend;
-     C) ROAS <= cutFloor(1,3) com venda. */
-  if (sales === 0 && sp >= RULES.cutNoSaleSpend) return { action: 'PAUSAR (0 venda, $' + Math.round(sp) + ' gastos)', key: 'PAUSAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
-  if (sales === 0 && ic === 0 && cpc > RULES.pauseCpc && sp > RULES.pauseSpend) return { action: 'PAUSAR (CPC ' + (isFinite(cpc) ? '$' + cpc.toFixed(2) : 'alto/0 cliques') + ', 0 venda/IC, $' + Math.round(sp) + ')', key: 'PAUSAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
-  if (sales >= 1 && roas <= cutFloor) return { action: 'PAUSAR (ROAS ' + roas.toFixed(2) + ' <= ' + cutFloor.toFixed(1) + ', ' + sales + ' venda)', key: 'PAUSAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
-  var target = null, action = '', key = '';
+  /* 0 VENDA: pausa por gasto (>=cutNoSaleSpend $100) ou por CPC (>pauseCpc, 0 IC, >pauseSpend); senao Coletando. */
   if (sales === 0) {
-    /* 0 venda com gasto < cutNoSaleSpend (senao ja teria pausado acima) -> Coletando. */
-    action = 'COLETANDO'; key = 'COLETANDO';
-  } else if (sales > RULES.aumMaxSales) {
-    /* >5 vendas: ROAS<=1,3 ja pausou acima. ROAS >= 2,0 (ou vende sem gasto) ESCALA; 1,3<roas<2,0 -> MANTER. */
-    if (roas >= RULES.excRoas || (sp < 1 && sales > 0)) { var escV = Math.max(sp, RULES.floorDaily) * RULES.scaleMult; if (curDaily > 0 && escV <= curDaily) { action = 'MANTER_JA_ESCALADA'; key = 'MANTER'; } else { target = escV; action = 'ESCALAR'; key = 'ESCALAR'; } }
-    else { action = 'MANTER_VOLUME'; key = 'MANTER'; }
-  } else if (roas >= minAcc) {
-    /* VENCEDORA: ROAS >= piso aceitavel (accBase 1.5, ou accGood 1.35 em dia BOM com >2 vendas). */
-    /* Base = GASTO REAL de hoje (nao o ritmo teorico saldo/dias, que gera escala absurda). */
-    var baseDaily = Math.max(sp, RULES.floorDaily);
-    var excellent = (roas >= RULES.excRoas) || (sp < 1 && sales > 0);
-    if (excellent) { var escW = baseDaily * RULES.scaleMult; if (curDaily > 0 && escW <= curDaily) { action = 'MANTER_JA_ESCALADA'; key = 'MANTER'; } else { target = escW; action = 'ESCALAR'; key = 'ESCALAR'; } }
-    else {
-      var pct = Math.max(RULES.aumPctLow, Math.min(RULES.aumPctHigh, RULES.aumPctLow + (roas - RULES.aumRoasLow) / (RULES.aumRoasHigh - RULES.aumRoasLow) * (RULES.aumPctHigh - RULES.aumPctLow)));
-      var formula = Math.max(RULES.floorDaily, sales * RULES.cpaTarget * (1 + pct));
-      if (formula > Math.max(sp, curDaily)) { target = formula; action = 'AUMENTAR_PROPORCIONAL'; key = 'AUMENTAR'; }
-      else { action = 'MANTER'; key = 'MANTER'; }
-    }
-  } else {
-    /* ROAS entre 1,3 (exclusivo — <=1,3 ja pausou) e o piso -> LIMITAR no gasto de hoje. */
-    target = Math.max(sp, RULES.floorDaily); action = 'LIMITAR_NO_GASTO'; key = 'LIMITAR';
+    if (sp >= RULES.cutNoSaleSpend) return { action: 'PAUSAR (0 venda, $' + Math.round(sp) + ' gastos)', key: 'PAUSAR', target: null, newEnd: null, cpa: null, roas: 0, sales: 0, spend: sp };
+    if (ic === 0 && cpc > RULES.pauseCpc && sp > RULES.pauseSpend) return { action: 'PAUSAR (CPC ' + (isFinite(cpc) ? '$' + cpc.toFixed(2) : 'alto/0 cliques') + ', 0 venda/IC, $' + Math.round(sp) + ')', key: 'PAUSAR', target: null, newEnd: null, cpa: null, roas: 0, sales: 0, spend: sp };
+    return { action: 'COLETANDO', key: 'COLETANDO', target: null, newEnd: null, cpa: Infinity, roas: 0, sales: 0, spend: sp };
   }
-  var newEnd = (target && rem > 0) ? brDatePlus(Math.max(1, Math.ceil(rem / target))) : null;
-  return { action: action, key: key, target: target, newEnd: newEnd, cpa: cpa, roas: roas, sales: sales, spend: sp };
+  /* >5 VENDAS: robo SO pausa abaixo de minRoas(1,3); acima disso MANTER (escala/gestao MANUAL). */
+  if (sales > RULES.aumMaxSales) {
+    if (roas < RULES.minRoas) return { action: 'PAUSAR (ROAS ' + roas.toFixed(2) + ' < ' + RULES.minRoas + ', ' + sales + ' vendas)', key: 'PAUSAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
+    return { action: 'MANTER (>' + RULES.aumMaxSales + ' vendas, ROAS ' + roas.toFixed(2) + ' — gestao manual)', key: 'MANTER', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
+  }
+  /* 1-5 VENDAS: ROAS < pauseRoas(1,5) -> PAUSA. */
+  if (roas < RULES.pauseRoas) return { action: 'PAUSAR (ROAS ' + roas.toFixed(2) + ' < ' + RULES.pauseRoas + ', ' + sales + ' venda)', key: 'PAUSAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
+  /* ROAS >= 1,5: AUMENTAR +escPct(30%) do DIARIO ATUAL so se ROAS > escRoas(1,7) E vendas >= excMinSales(3); senao MANTER. */
+  if (roas > RULES.escRoas && sales >= RULES.excMinSales) {
+    var base = curDaily > 0 ? curDaily : Math.max(sp, RULES.floorDaily);
+    target = base * (1 + RULES.escPct);
+    var newEndA = (target && rem > 0) ? brDatePlus(Math.max(1, Math.ceil(rem / target))) : null;
+    return { action: 'AUMENTAR +' + Math.round(RULES.escPct * 100) + '% p/ $' + Math.round(target) + ' (ROAS ' + roas.toFixed(2) + ', ' + sales + ' vendas)', key: 'AUMENTAR', target: target, newEnd: newEndA, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
+  }
+  return { action: 'MANTER (ROAS ' + roas.toFixed(2) + ', mantem orcamento)', key: 'MANTER', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
 }
 
 /* Busca o gasto vitalicio de varias campanhas em 1 chamada por token (Meta Batch API).
