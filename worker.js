@@ -18,7 +18,7 @@ var RULES = {
      >2 vendas E dia BOM -> accGood(1.35); >2 vendas dia nao-bom -> accBase(1.5). */
   accBase: 1.5, accGood: 1.35, accGoodMinSales: 2,
   cutNoSaleSpend: 100,
-  pauseRoas: 1.5, escRoas: 1.7, escPct: 0.30, pauseSalesBreak: 3, // 1-3 vd: pausa ROAS<1,5; >3 vd: pausa ROAS<=1,3; ROAS>1,7 e 3+ vd -> +30%. Reativa: ROAS>1,5
+  pauseRoas: 1.5, escRoas: 1.7, escPct: 0.20, pauseSalesBreak: 3, // 1-3 vd: pausa ROAS<1,5; >3 vd: pausa ROAS<=1,3; ROAS>1,7 e 3+ vd -> +20%. Reativa: ROAS>1,5
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
   alert3dRoas: 1.0, alert3dMinSpend: 150,
@@ -35,7 +35,7 @@ function buildRules(env) {
     minRoas: n('R_MINROAS', 1.3),
     accBase: n('R_ACCBASE', 1.5), accGood: n('R_ACCGOOD', 1.35), accGoodMinSales: n('R_ACCGOODMINSALES', 2),
     cutNoSaleSpend: n('R_CUTNOSALE', 100),
-    pauseRoas: n('R_PAUSEROAS', 1.5), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.30), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
+    pauseRoas: n('R_PAUSEROAS', 1.5), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
     excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 12),
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70), aumMaxSales: n('R_AUMMAXSALES', 5),
     scaleUsePct: n('R_SCALEUSEPCT', 0.2), releaseDaily: n('R_RELEASE', 500),
@@ -169,7 +169,7 @@ function suggestRule(c, mood) {
   if (sales > RULES.pauseSalesBreak && roas <= RULES.minRoas) return { action: 'PAUSAR (ROAS ' + roas.toFixed(2) + ' <= ' + RULES.minRoas + ', ' + sales + ' vendas)', key: 'PAUSAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   /* Nao pausou. >5 vendas (aumMaxSales) -> MANTER (escala/gestao MANUAL, robo nao mexe). */
   if (sales > RULES.aumMaxSales) return { action: 'MANTER (>' + RULES.aumMaxSales + ' vendas, ROAS ' + roas.toFixed(2) + ' — gestao manual)', key: 'MANTER', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
-  /* ROAS >= 1,5: AUMENTAR +escPct(30%) do DIARIO ATUAL so se ROAS > escRoas(1,7) E vendas >= excMinSales(3); senao MANTER. */
+  /* ROAS >= 1,5: AUMENTAR +escPct(20%) do DIARIO ATUAL so se ROAS > escRoas(1,7) E vendas >= excMinSales(3); senao MANTER. */
   if (roas > RULES.escRoas && sales >= RULES.excMinSales) {
     var base = curDaily > 0 ? curDaily : Math.max(sp, RULES.floorDaily);
     target = base * (1 + RULES.escPct);
