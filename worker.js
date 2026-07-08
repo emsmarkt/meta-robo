@@ -23,7 +23,7 @@ var RULES = {
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
   alert3dRoas: 1.0, alert3dMinSpend: 150,
   pauseCpc: 4, pauseSpend: 60,  // PAUSAR (status PAUSED): CPC > $4 E 0 venda E 0 IC E gasto > $60
-  cooldownMin: 15      // minutos entre 2 aplicacoes na MESMA campanha (configuravel via R_COOLDOWN). Em teste: 15
+  cooldownMin: 5       // minutos entre 2 aplicacoes na MESMA campanha (configuravel via R_COOLDOWN). = 1 ciclo do cron
 };
 /* Le os parametros das variaveis do Cloudflare (se existirem), senao usa o padrao acima. */
 function buildRules(env) {
@@ -41,7 +41,7 @@ function buildRules(env) {
     scaleUsePct: n('R_SCALEUSEPCT', 0.2), releaseDaily: n('R_RELEASE', 500),
     alert3dRoas: n('R_ALERT3DROAS', 1.0), alert3dMinSpend: n('R_ALERT3DSPEND', 150),
     pauseCpc: n('R_PAUSECPC', 4), pauseSpend: n('R_PAUSESPEND', 60),
-    cooldownMin: n('R_COOLDOWN', 15)
+    cooldownMin: n('R_COOLDOWN', 5)
   };
 }
 

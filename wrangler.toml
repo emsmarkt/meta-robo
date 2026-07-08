@@ -29,7 +29,7 @@ R_DAYOK = "1.2"        # entre R_DAYOK e R_DAYGOOD = NORMAL; abaixo = RUIM
 R_MINSPEND = "100"     # (reservado)
 R_FLOOR = "85"         # piso de orcamento diario (US$) — valor do CORTAR
 R_CUTDAYS = "364"      # CORTAR empurra o termino p/ daqui X dias (limite FB e 365)
-R_COOLDOWN = "15"      # minutos entre 2 aplicacoes na MESMA campanha (em teste: 15; era 60 fixo)
+R_COOLDOWN = "5"       # minutos entre 2 aplicacoes na MESMA campanha (5 = reage a cada ciclo do cron)
 R_PAUSECPC = "4"       # PAUSAR: CPC (US$) acima disso...
 R_PAUSESPEND = "60"    # ...E gasto acima disso, com 0 venda E 0 IC -> pausa a campanha (status PAUSED)
 R_CPATARGET = "175"    # teto de CPA = META de ROAS (175 -> 1.5)
