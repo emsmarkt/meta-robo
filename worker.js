@@ -18,6 +18,7 @@ var RULES = {
      >2 vendas E dia BOM -> accGood(1.35); >2 vendas dia nao-bom -> accBase(1.5). */
   accBase: 1.5, accGood: 1.35, accGoodMinSales: 2,
   cutNoSaleSpend: 100,
+  limSpendTrigger: 130, limSpendCap: 140, // SEM venda: gasto >= 130 -> LIMITAR GASTO no conjunto (soft-stop), trava a campanha em 140 no dia. Substitui o pause por gasto.
   pauseRoas: 1.5, escRoas: 1.7, escPct: 0.20, pauseSalesBreak: 3, // 1-3 vd: pausa ROAS<1,5; >3 vd: pausa ROAS<=1,3; ROAS>1,7 e 3+ vd -> +20%. Reativa: ROAS>1,5
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
@@ -36,6 +37,7 @@ function buildRules(env) {
     accBase: n('R_ACCBASE', 1.5), accGood: n('R_ACCGOOD', 1.35), accGoodMinSales: n('R_ACCGOODMINSALES', 2),
     cutNoSaleSpend: n('R_CUTNOSALE', 100),
     pauseRoas: n('R_PAUSEROAS', 1.5), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
+    limSpendTrigger: n('R_LIMTRIG', 130), limSpendCap: n('R_LIMCAP', 140),
     excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 12),
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70), aumMaxSales: n('R_AUMMAXSALES', 5),
     scaleUsePct: n('R_SCALEUSEPCT', 0.2), releaseDaily: n('R_RELEASE', 500),
@@ -157,9 +159,16 @@ function suggestRule(c, mood) {
     if (sales >= 1 && roas > RULES.pauseRoas) return { action: 'ATIVAR (ROAS ' + roas.toFixed(2) + ' > ' + RULES.pauseRoas + ')', key: 'ATIVAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
     return { action: 'PAUSADA', key: 'PAUSADA', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   }
-  /* 0 VENDA: pausa por gasto (>=cutNoSaleSpend $100) ou por CPC (>pauseCpc, 0 IC, >pauseSpend); senao Coletando. */
+  /* LIMITADA: campanha ATIVA com limite de gasto no conjunto (lifetime_spend_cap) = soft-stop.
+     Voltou a vender -> REMLIMITE (SO manual no dashboard; o robo NUNCA remove). Sem venda -> fica parada. */
+  if (c._hasCap) {
+    if (sales >= 1) return { action: 'REMOVER LIMITE (vendeu — ROAS ' + roas.toFixed(2) + ', ' + sales + ' venda)', key: 'REMLIMITE', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
+    return { action: 'Limite de gasto ativo (parada, sem venda)', key: 'REMLIMITE', target: null, newEnd: null, cpa: null, roas: 0, sales: 0, spend: sp };
+  }
+  /* 0 VENDA: gasto >= limSpendTrigger($130) -> LIMITAR GASTO (soft-stop, trava em $140; SUBSTITUI o pause por gasto).
+     Mantem PAUSAR por CPC ruim (matar rapido); senao Coletando. */
   if (sales === 0) {
-    if (sp >= RULES.cutNoSaleSpend) return { action: 'PAUSAR (0 venda, $' + Math.round(sp) + ' gastos)', key: 'PAUSAR', target: null, newEnd: null, cpa: null, roas: 0, sales: 0, spend: sp };
+    if (sp >= RULES.limSpendTrigger) return { action: 'LIMITAR GASTO (trava em $' + RULES.limSpendCap + ', $' + Math.round(sp) + ' hoje s/ venda)', key: 'LIMITAR_GASTO', target: null, newEnd: null, cpa: null, roas: 0, sales: 0, spend: sp };
     if (ic === 0 && cpc > RULES.pauseCpc && sp > RULES.pauseSpend) return { action: 'PAUSAR (CPC ' + (isFinite(cpc) ? '$' + cpc.toFixed(2) : 'alto/0 cliques') + ', 0 venda/IC, $' + Math.round(sp) + ')', key: 'PAUSAR', target: null, newEnd: null, cpa: null, roas: 0, sales: 0, spend: sp };
     return { action: 'COLETANDO', key: 'COLETANDO', target: null, newEnd: null, cpa: Infinity, roas: 0, sales: 0, spend: sp };
   }
@@ -202,6 +211,37 @@ async function batchLifetimeSpend(camps, lifeRange) {
           });
         }
       } catch (e) { chunk.forEach(function (c) { c._spend = 0; }); }
+    }
+  }
+}
+
+/* Busca os CONJUNTOS (ad sets) de cada campanha em LOTE (Batch API): id, status e limite atual
+   (lifetime_spend_cap). Popula c._adsets e c._hasCap (>=1 conjunto com limite = campanha ja limitada). */
+async function batchAdsetCaps(camps) {
+  var byTk = {};
+  camps.forEach(function (c) { c._adsets = []; c._hasCap = false; (byTk[c._tk] = byTk[c._tk] || []).push(c); });
+  for (var tk in byTk) {
+    var list = byTk[tk];
+    for (var i = 0; i < list.length; i += 50) {
+      var chunk = list.slice(i, i + 50);
+      var batch = chunk.map(function (c) { return { method: 'GET', relative_url: c.id + '/adsets?fields=id,effective_status,lifetime_spend_cap&limit=50' }; });
+      var body = new URLSearchParams();
+      body.append('batch', JSON.stringify(batch));
+      body.append('access_token', tk);
+      try {
+        var resp = await fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() });
+        var arr = await resp.json();
+        if (Array.isArray(arr)) {
+          arr.forEach(function (item, idx) {
+            var c = chunk[idx];
+            try {
+              var b = JSON.parse(item.body); var sets = b.data || [];
+              c._adsets = sets;
+              c._hasCap = sets.some(function (s) { return s.lifetime_spend_cap != null && +s.lifetime_spend_cap > 0; });
+            } catch (e) { c._adsets = []; c._hasCap = false; }
+          });
+        }
+      } catch (e) {}
     }
   }
 }
@@ -256,6 +296,8 @@ async function collect(env) {
   var sinceLife = new Date(); sinceLife.setMonth(sinceLife.getMonth() - 36);
   var lifeRange = encodeURIComponent(JSON.stringify({ since: sinceLife.toISOString().split('T')[0], until: brDatePlus(0) }));
   await batchLifetimeSpend(camps, lifeRange);
+  /* Conjuntos + limite de gasto atual (p/ regra LIMITAR/REMOVER e detectar campanha ja limitada). */
+  await batchAdsetCaps(camps);
 
   // Cambio USD/BRL AO VIVO (AwesomeAPI); fallback R_FX. Converte o custo do RedTrack (R$) em US$.
   var fx = await liveFx(env);
@@ -318,6 +360,41 @@ async function applyChange(c, tokens, newEnd) {
   }
 }
 
+/* Aplica LIMITE DE GASTO (lifetime_spend_cap) nos conjuntos ATIVOS = soft-stop (NAO pausa, nao reseta aprendizado).
+   folga = limCap - gasto de hoje, dividida entre os conjuntos; cada conjunto: gasto vitalicio DELE + fatia.
+   Soma dos caps = gasto vitalicio da campanha + folga -> campanha nao passa de ~limCap hoje.
+   Cada cap >= gasto do proprio conjunto (senao o Facebook REJEITA). Valores em CENTAVOS. */
+async function applySpendCap(c, tokens, todaySpend, limCap) {
+  var active = (c._adsets || []).filter(function (s) { return (s.effective_status || '').toUpperCase() === 'ACTIVE'; });
+  if (!active.length) return false;
+  /* gasto vitalicio POR conjunto (fresco, Batch API) — o Facebook exige cap >= isso. */
+  var sinceLife = new Date(); sinceLife.setMonth(sinceLife.getMonth() - 36);
+  var lifeRange = encodeURIComponent(JSON.stringify({ since: sinceLife.toISOString().split('T')[0], until: brDatePlus(0) }));
+  var batch = active.map(function (s) { return { method: 'GET', relative_url: s.id + '/insights?fields=spend&time_range=' + lifeRange }; });
+  var byLife = {};
+  try {
+    var r = await withTokenFallback(tokens, c._tk, function (tk) {
+      var b = new URLSearchParams(); b.append('batch', JSON.stringify(batch)); b.append('access_token', tk);
+      return fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: b.toString() }).then(function (x) { return x.json(); });
+    });
+    var arr = r.result;
+    if (!Array.isArray(arr)) return false;
+    arr.forEach(function (item, idx) { try { var bb = JSON.parse(item.body); byLife[active[idx].id] = (bb.data && bb.data[0]) ? parseFloat(bb.data[0].spend) || 0 : 0; } catch (e) { byLife[active[idx].id] = 0; } });
+  } catch (e) { return false; }
+  var headroom = Math.max(0, limCap - todaySpend);
+  var share = headroom / active.length;
+  var okAny = false;
+  for (var i = 0; i < active.length; i++) {
+    var life = byLife[active[i].id] || 0;
+    var capCents = Math.round(life * 100) + Math.max(1, Math.round(share * 100)); /* >= gasto do conjunto + fatia da folga */
+    try {
+      await withTokenFallback(tokens, c._tk, (function (adId, cents) { return function (tk) { return postForm(adId, tk, { lifetime_spend_cap: cents }); }; })(active[i].id, capCents));
+      okAny = true;
+    } catch (e) {}
+  }
+  return okAny;
+}
+
 /* ---------- execução principal ---------- */
 async function run(env) {
   RULES = buildRules(env); // aplica os parametros das variaveis do Cloudflare (ou os padroes)
@@ -340,6 +417,7 @@ async function run(env) {
   var appliedDirty = false, today = brDatePlus(0);
   var actions = [];
   var pausedList = []; /* campanhas pausadas neste ciclo (p/ alerta Telegram) */
+  var limitedList = []; /* campanhas que receberam LIMITE DE GASTO neste ciclo (p/ alerta Telegram) */
   for (var i = 0; i < camps.length; i++) {
     var c = camps[i];
     var r = suggestRule(c, moodObj.mood);
@@ -356,6 +434,27 @@ async function run(env) {
           histDirty = true;
         } catch (e) {}
       }
+    } else if (r.key === 'LIMITAR_GASTO') {
+      /* ── LIMITAR GASTO: soft-stop sem venda. Aplica lifetime_spend_cap nos conjuntos (live, campanha ativa,
+         nao ja limitada, respeitando cooldown). NAO pausa. REMLIMITE fica de fora (remocao SO manual). ── */
+      limitedList.push({ id: c.id, name: c.name, action: r.action });
+      if ((env.APPLY_MODE || 'dry') === 'live' && (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') {
+        var prevL = appliedMap[c.id];
+        var sameL = prevL && prevL.day === today && prevL.sig === 'LIMITAR_GASTO';
+        var ckL = 'cd:' + c.id, lastL = 0;
+        try { lastL = parseInt(await env.RULES_KV.get(ckL)) || 0; } catch (e) {}
+        if (!sameL && (Date.now() - lastL >= RULES.cooldownMin * 60 * 1000)) {
+          var okL = await applySpendCap(c, tokens, r.spend, RULES.limSpendCap);
+          if (okL) {
+            try { await env.RULES_KV.put(ckL, String(Date.now())); } catch (e) {}
+            appliedMap[c.id] = { sig: 'LIMITAR_GASTO', action: r.action, t: Date.now(), day: today };
+            appliedDirty = true;
+            histLog.unshift({ id: c.id, name: c.name, t: Date.now(), day: today, sig: 'LIMITAR_GASTO', action: r.action, roas: +r.roas.toFixed(2), sales: r.sales, spend: Math.round(r.spend), dailyOld: null, dailyNew: null, endOld: null, endNew: null, source: 'robo', tkId: (c._tk ? String(c._tk).slice(-6) : '') });
+            if (histLog.length > 500) histLog = histLog.slice(0, 500);
+            histDirty = true;
+          }
+        }
+      }
     } else if ((env.APPLY_MODE || 'dry') === 'live' && r.newEnd && r.key) {
       var prev = appliedMap[c.id];
       var sameAsLast = prev && prev.day === today && prev.sig === r.key; // a ULTIMA aplicada hoje ja foi essa mesma regra -> nao repete (mas reaplica se mudou e voltou)
@@ -366,12 +465,17 @@ async function run(env) {
         try { await env.RULES_KV.put(ck, String(Date.now())); } catch (e) {}
         appliedMap[c.id] = { sig: r.key, action: r.action, t: Date.now(), day: today };
         appliedDirty = true;
+        /* ANTES da mudanca: ritmo diario atual e termino atual, p/ o dashboard mostrar "anterior -> novo". */
+        var dOld = currentDailyOf(c);
+        var eOld = null;
+        try { if (c.stop_time) { var _so = (typeof c.stop_time === 'number') ? new Date(c.stop_time * 1000) : new Date(c.stop_time); eOld = _so.toISOString().split('T')[0]; } } catch (e) {}
         /* Append RICO no historico do robo (cap 500, mais novo no topo). */
         histLog.unshift({
           id: c.id, name: c.name, t: Date.now(), day: today,
           sig: r.key, action: r.action,
           roas: +r.roas.toFixed(2), sales: r.sales, spend: Math.round(r.spend),
-          dailyNew: r.target != null ? Math.round(r.target) : null, endNew: r.newEnd,
+          dailyOld: dOld > 0 ? Math.round(dOld) : null, dailyNew: r.target != null ? Math.round(r.target) : null,
+          endOld: eOld, endNew: r.newEnd,
           source: 'robo',
           tkId: (c._tk ? String(c._tk).slice(-6) : '') /* id CURTO do token p/ filtro por estrutura no dashboard */
         });
@@ -400,6 +504,19 @@ async function run(env) {
         if (lines.length > 25) show.push('…e mais ' + (lines.length - 25) + ' campanha(s).');
         var head = liveMode ? '\u{1F6D1} Robô PAUSOU ' : '⚠️ Robô PAUSARIA (dry, não pausou) ';
         await sendTelegram(env, head + lines.length + ' campanha(s):\n\n' + show.join('\n\n'));
+      }
+      /* LIMITE DE GASTO (soft-stop sem venda), 1x/dia por campanha. */
+      var linesL = [];
+      for (var li = 0; li < limitedList.length; li++) {
+        var ll = limitedList[li];
+        var lk = ll.id + ':limit';
+        if (newSent[lk] !== today) { linesL.push('• ' + ll.name + '\n   ' + ll.action); newSent[lk] = today; }
+      }
+      if (linesL.length) {
+        var showL = linesL.slice(0, 25);
+        if (linesL.length > 25) showL.push('…e mais ' + (linesL.length - 25) + ' campanha(s).');
+        var headL = liveMode ? '\u{1F6A7} Robô LIMITOU o gasto de ' : '⚠️ Robô LIMITARIA o gasto (dry) de ';
+        await sendTelegram(env, headL + linesL.length + ' campanha(s):\n\n' + showL.join('\n\n'));
       }
       try { await env.RULES_KV.put('tgSent', JSON.stringify(newSent)); } catch (e) {}
     } catch (e) { DIAG.tgErr = String((e && e.message) || e); }

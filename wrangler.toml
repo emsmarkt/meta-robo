@@ -19,7 +19,7 @@ id = "62fa6d5180d6403f81a5485e1e77d5ea"
 #   TG_CHAT  = seu chat id (do @userinfobot) — pode ser var normal.
 # Sem esses dois, os alertas ficam desligados (o resto do robo roda igual).
 [vars]
-APPLY_MODE = "dry"
+APPLY_MODE = "live"
 RT_PTYPE = "1"
 RT_ICTYPE = "2"
 
@@ -45,6 +45,8 @@ R_PAUSEROAS = "1.5"    # <=5 vendas: ROAS abaixo disso -> PAUSA. Tbm o limite de
 R_ESCROAS = "1.7"      # aumenta so acima disso (com excMinSales+ vendas)
 R_ESCPCT = "0.20"      # aumento = +20% do diario atual
 R_PAUSESALESBREAK = "3"  # ATE N vendas pausa por R_PAUSEROAS(1,5); ACIMA de N pausa por R_MINROAS(1,3)
+R_LIMTRIG = "130"      # SEM venda: gasto hoje >= isso -> LIMITAR GASTO no conjunto (soft-stop, nao pausa)
+R_LIMCAP = "140"       # ...trava a campanha nesse teto de gasto no dia (Maximo total do conjunto)
 R_EXCROAS = "2.0"      # excepcional: ROAS >= isso ...
 R_EXCMINSALES = "3"    # ... com pelo menos N vendas -> escalar
 R_SCALEMULT = "12"     # multiplicador de escala (12x o gasto de hoje; range util 10-15)
