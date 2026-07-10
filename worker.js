@@ -18,7 +18,7 @@ var RULES = {
      >2 vendas E dia BOM -> accGood(1.35); >2 vendas dia nao-bom -> accBase(1.5). */
   accBase: 1.5, accGood: 1.35, accGoodMinSales: 2,
   cutNoSaleSpend: 100,
-  limSpendTrigger: 130, limSpendCap: 140, // SEM venda: gasto >= 130 -> LIMITAR GASTO no conjunto (soft-stop), trava a campanha em 140 no dia. Substitui o pause por gasto.
+  limSpendTrigger: 106, limSpendCap: 140, // SEM venda: gasto >= 106 -> LIMITAR GASTO no conjunto (soft-stop). Meta forca teto ~1,33x o gasto, entao 106 x 1,33 ~= 140 (teto real). Substitui o pause por gasto.
   pauseRoas: 1.5, escRoas: 1.7, escPct: 0.20, pauseSalesBreak: 3, // 1-3 vd: pausa ROAS<1,5; >3 vd: pausa ROAS<=1,3; ROAS>1,7 e 3+ vd -> +20%. Reativa: ROAS>1,5
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
@@ -37,7 +37,7 @@ function buildRules(env) {
     accBase: n('R_ACCBASE', 1.5), accGood: n('R_ACCGOOD', 1.35), accGoodMinSales: n('R_ACCGOODMINSALES', 2),
     cutNoSaleSpend: n('R_CUTNOSALE', 100),
     pauseRoas: n('R_PAUSEROAS', 1.5), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
-    limSpendTrigger: n('R_LIMTRIG', 130), limSpendCap: n('R_LIMCAP', 140),
+    limSpendTrigger: n('R_LIMTRIG', 106), limSpendCap: n('R_LIMCAP', 140),
     excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 12),
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70), aumMaxSales: n('R_AUMMAXSALES', 5),
     scaleUsePct: n('R_SCALEUSEPCT', 0.2), releaseDaily: n('R_RELEASE', 500),
@@ -99,7 +99,7 @@ function postForm(id, tk, params, _try) {
         var msg = d.error.message || '';
         var transient = d.error.is_transient || d.error.code === 2 || /unexpected error|please (?:retry|try again)|temporar/i.test(msg);
         if (transient && _try < 1) { return new Promise(function (res) { setTimeout(res, 1000); }).then(function () { return postForm(id, tk, params, _try + 1); }); }
-        throw new Error(msg);
+        throw new Error(msg + (d.error.error_user_msg ? ' - ' + d.error.error_user_msg : ''));
       }
       return d;
     });
@@ -237,7 +237,12 @@ async function batchAdsetCaps(camps) {
             try {
               var b = JSON.parse(item.body); var sets = b.data || [];
               c._adsets = sets;
-              c._hasCap = sets.some(function (s) { return s.lifetime_spend_cap != null && +s.lifetime_spend_cap > 0; });
+              /* Teto >= orcamento total da campanha = "sem limite" (e assim que o Remover do dash libera). */
+              var lbC = parseInt(c.lifetime_budget) || 0;
+              c._hasCap = sets.some(function (s) {
+                var cap = (s.lifetime_spend_cap != null) ? +s.lifetime_spend_cap : 0;
+                return cap > 0 && (lbC <= 0 || cap < lbC);
+              });
             } catch (e) { c._adsets = []; c._hasCap = false; }
           });
         }
@@ -387,12 +392,38 @@ async function applySpendCap(c, tokens, todaySpend, limCap) {
   for (var i = 0; i < active.length; i++) {
     var life = byLife[active[i].id] || 0;
     var capCents = Math.round(life * 100) + Math.max(1, Math.round(share * 100)); /* >= gasto do conjunto + fatia da folga */
+    var adId = active[i].id;
+    var doPost = function (a, ce) { return function (tk) { return postForm(a, tk, { lifetime_spend_cap: ce }); }; };
     try {
-      await withTokenFallback(tokens, c._tk, (function (adId, cents) { return function (tk) { return postForm(adId, tk, { lifetime_spend_cap: cents }); }; })(active[i].id, capCents));
+      await withTokenFallback(tokens, c._tk, doPost(adId, capCents));
       okAny = true;
-    } catch (e) {}
+    } catch (e1) {
+      /* Facebook recusou por estar abaixo do minimo dele -> le o minimo da msg e repete. */
+      var mn = metaMinCapCents(e1 && e1.message);
+      if (mn && mn > capCents) {
+        /* MEDICAO: guarda o par (gasto do conjunto -> minimo exigido) p/ confirmar o fator (~1,33) no /run. */
+        try {
+          DIAG.capMins = DIAG.capMins || [];
+          if (DIAG.capMins.length < 20) DIAG.capMins.push({ ad: adId, gasto: +life.toFixed(2), min: +((mn - 50) / 100).toFixed(2), fator: life > 0 ? +(((mn - 50) / 100) / life).toFixed(3) : null });
+        } catch (e3) {}
+        try { await withTokenFallback(tokens, c._tk, doPost(adId, mn)); okAny = true; } catch (e2) {}
+      }
+    }
   }
   return okAny;
+}
+
+/* Le o MINIMO que o Facebook exige quando recusa um lifetime_spend_cap baixo
+   ("...deve ser de pelo menos US$92,92") -> centavos + 50 de margem. pt-BR e en. 0 se nao achar. */
+function metaMinCapCents(msg) {
+  msg = String(msg || '');
+  var m = msg.match(/pelo menos[^\d]*([\d.,]+)/i) || msg.match(/at least[^\d]*([\d.,]+)/i) || msg.match(/US?\$\s*([\d.,]+)/);
+  if (!m) return 0;
+  var num = m[1];
+  if (num.indexOf(',') >= 0) num = num.replace(/\./g, '').replace(',', '.');
+  var v = parseFloat(num);
+  if (!isFinite(v) || v <= 0) return 0;
+  return Math.ceil(v * 100) + 50;
 }
 
 /* ---------- execução principal ---------- */
