@@ -19,11 +19,12 @@ var RULES = {
   accBase: 1.5, accGood: 1.35, accGoodMinSales: 2,
   cutNoSaleSpend: 100,
   limSpendTrigger: 106, limSpendCap: 140, // SEM venda: gasto >= 106 -> LIMITAR GASTO no conjunto (soft-stop). Meta forca teto ~1,33x o gasto, entao 106 x 1,33 ~= 140 (teto real). Substitui o pause por gasto.
+  limRoasFew: 1.4, limRoasMany: 1.35, // COM venda: ROAS <= isso -> LIMITAR. <=5 vendas: 1,4; >5 vendas: 1,35.
   pauseRoas: 1.5, escRoas: 1.7, escPct: 0.20, pauseSalesBreak: 3, // 1-3 vd: pausa ROAS<1,5; >3 vd: pausa ROAS<=1,3; ROAS>1,7 e 3+ vd -> +20%. Reativa: ROAS>1,5
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
   alert3dRoas: 1.0, alert3dMinSpend: 150,
-  pauseCpc: 4, pauseSpend: 60,  // PAUSAR (status PAUSED): CPC > $4 E 0 venda E 0 IC E gasto > $60
+  pauseCpc: 3, pauseSpend: 60, pauseAlertMin: 50,  // CPC>$3 E 0 venda/IC E gasto>$60 -> LIMITAR GASTO (soft-stop). pauseAlertMin: min pausada -> avisa p/ reativar
   cooldownMin: 5       // minutos entre 2 aplicacoes na MESMA campanha (configuravel via R_COOLDOWN). = 1 ciclo do cron
 };
 /* Le os parametros das variaveis do Cloudflare (se existirem), senao usa o padrao acima. */
@@ -38,11 +39,12 @@ function buildRules(env) {
     cutNoSaleSpend: n('R_CUTNOSALE', 100),
     pauseRoas: n('R_PAUSEROAS', 1.5), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
     limSpendTrigger: n('R_LIMTRIG', 106), limSpendCap: n('R_LIMCAP', 140),
+    limRoasFew: n('R_LIMROASFEW', 1.4), limRoasMany: n('R_LIMROASMANY', 1.35),
     excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 12),
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70), aumMaxSales: n('R_AUMMAXSALES', 5),
     scaleUsePct: n('R_SCALEUSEPCT', 0.2), releaseDaily: n('R_RELEASE', 500),
     alert3dRoas: n('R_ALERT3DROAS', 1.0), alert3dMinSpend: n('R_ALERT3DSPEND', 150),
-    pauseCpc: n('R_PAUSECPC', 4), pauseSpend: n('R_PAUSESPEND', 60),
+    pauseCpc: n('R_PAUSECPC', 3), pauseSpend: n('R_PAUSESPEND', 60), pauseAlertMin: n('R_PAUSEALERTMIN', 50),
     cooldownMin: n('R_COOLDOWN', 5)
   };
 }
@@ -165,17 +167,19 @@ function suggestRule(c, mood) {
     if (sales >= 1) return { action: 'REMOVER LIMITE (vendeu — ROAS ' + roas.toFixed(2) + ', ' + sales + ' venda)', key: 'REMLIMITE', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
     return { action: 'Limite de gasto ativo (parada, sem venda)', key: 'REMLIMITE', target: null, newEnd: null, cpa: null, roas: 0, sales: 0, spend: sp };
   }
-  /* 0 VENDA: gasto >= limSpendTrigger($130) -> LIMITAR GASTO (soft-stop, trava em $140; SUBSTITUI o pause por gasto).
-     Mantem PAUSAR por CPC ruim (matar rapido); senao Coletando. */
+  /* 0 VENDA: gasto >= limSpendTrigger($106) -> LIMITAR GASTO (teto ~$140).
+     CPC ruim (>pauseCpc$3, 0 IC, >pauseSpend$60) -> LIMITAR no gasto de hoje. Senao Coletando. */
   if (sales === 0) {
-    if (sp >= RULES.limSpendTrigger) return { action: 'LIMITAR GASTO (trava em $' + RULES.limSpendCap + ', $' + Math.round(sp) + ' hoje s/ venda)', key: 'LIMITAR_GASTO', target: null, newEnd: null, cpa: null, roas: 0, sales: 0, spend: sp };
-    if (ic === 0 && cpc > RULES.pauseCpc && sp > RULES.pauseSpend) return { action: 'PAUSAR (CPC ' + (isFinite(cpc) ? '$' + cpc.toFixed(2) : 'alto/0 cliques') + ', 0 venda/IC, $' + Math.round(sp) + ')', key: 'PAUSAR', target: null, newEnd: null, cpa: null, roas: 0, sales: 0, spend: sp };
+    if (sp >= RULES.limSpendTrigger) return { action: 'LIMITAR GASTO (trava ~$' + RULES.limSpendCap + ', $' + Math.round(sp) + ' hoje s/ venda)', key: 'LIMITAR_GASTO', target: RULES.limSpendCap, newEnd: null, cpa: null, roas: 0, sales: 0, spend: sp };
+    if (ic === 0 && cpc > RULES.pauseCpc && sp > RULES.pauseSpend) return { action: 'LIMITAR GASTO (CPC ' + (isFinite(cpc) ? '$' + cpc.toFixed(2) : 'alto/0 cliques') + ' s/ venda, $' + Math.round(sp) + ' hoje)', key: 'LIMITAR_GASTO', target: sp, newEnd: null, cpa: null, roas: 0, sales: 0, spend: sp };
     return { action: 'COLETANDO', key: 'COLETANDO', target: null, newEnd: null, cpa: Infinity, roas: 0, sales: 0, spend: sp };
   }
-  /* PAUSA por TIER de vendas: 1-3 vendas (<=pauseSalesBreak) pausa se ROAS < pauseRoas(1,5);
-     >3 vendas pausa so se ROAS <= minRoas(1,3). */
+  /* COM VENDA (nao pausa mais quando ROAS baixo): ROAS <= limRoas -> LIMITAR no GASTO DE HOJE
+     (limRoas = limRoasFew(1,4) ate 5 vendas; limRoasMany(1,35) acima de 5). 1-3 vendas com limRoas < ROAS
+     < pauseRoas(1,5) -> PAUSAR (UNICA pausa que sobra; run() avisa no Telegram aos ~50min p/ reativar). */
+  var limRoas = (sales > RULES.aumMaxSales) ? RULES.limRoasMany : RULES.limRoasFew;
+  if (roas <= limRoas) return { action: 'LIMITAR GASTO no atual (ROAS ' + roas.toFixed(2) + ' <= ' + limRoas + ', ' + sales + ' vendas, $' + Math.round(sp) + ' hoje)', key: 'LIMITAR_GASTO', target: sp, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   if (sales <= RULES.pauseSalesBreak && roas < RULES.pauseRoas) return { action: 'PAUSAR (ROAS ' + roas.toFixed(2) + ' < ' + RULES.pauseRoas + ', ' + sales + ' venda)', key: 'PAUSAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
-  if (sales > RULES.pauseSalesBreak && roas <= RULES.minRoas) return { action: 'PAUSAR (ROAS ' + roas.toFixed(2) + ' <= ' + RULES.minRoas + ', ' + sales + ' vendas)', key: 'PAUSAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   /* Nao pausou. >5 vendas (aumMaxSales) -> MANTER (escala/gestao MANUAL, robo nao mexe). */
   if (sales > RULES.aumMaxSales) return { action: 'MANTER (>' + RULES.aumMaxSales + ' vendas, ROAS ' + roas.toFixed(2) + ' — gestao manual)', key: 'MANTER', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   /* ROAS >= 1,5: AUMENTAR +escPct(20%) do DIARIO ATUAL so se ROAS > escRoas(1,7) E vendas >= excMinSales(3); senao MANTER. */
@@ -449,6 +453,10 @@ async function run(env) {
   var actions = [];
   var pausedList = []; /* campanhas pausadas neste ciclo (p/ alerta Telegram) */
   var limitedList = []; /* campanhas que receberam LIMITE DE GASTO neste ciclo (p/ alerta Telegram) */
+  var reactList = [];  /* pausadas ha ~pauseAlertMin min (ROAS>1,3) -> aviso Telegram p/ reativar antes de 1h */
+  /* Momento em que o robo pausou cada campanha (KV) -> base do aviso "reative antes de 1h". */
+  var pausedAt = {}; try { var pa = await env.RULES_KV.get('pausedAt'); if (pa) { var pj = JSON.parse(pa); if (pj && typeof pj === 'object') pausedAt = pj; } } catch (e) {}
+  var pausedAtDirty = false;
   for (var i = 0; i < camps.length; i++) {
     var c = camps[i];
     var r = suggestRule(c, moodObj.mood);
@@ -460,6 +468,7 @@ async function run(env) {
       if ((env.APPLY_MODE || 'dry') === 'live' && (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') {
         try {
           await withTokenFallback(tokens, c._tk, function (tk) { return postForm(c.id, tk, { status: 'PAUSED' }); });
+          pausedAt[c.id] = Date.now(); pausedAtDirty = true; /* base do aviso "reative antes de 1h" */
           histLog.unshift({ id: c.id, name: c.name, t: Date.now(), day: today, sig: 'PAUSAR', action: r.action, roas: +r.roas.toFixed(2), sales: r.sales, spend: Math.round(r.spend), dailyNew: null, endNew: null, source: 'robo', tkId: (c._tk ? String(c._tk).slice(-6) : '') });
           if (histLog.length > 500) histLog = histLog.slice(0, 500);
           histDirty = true;
@@ -475,7 +484,8 @@ async function run(env) {
         var ckL = 'cd:' + c.id, lastL = 0;
         try { lastL = parseInt(await env.RULES_KV.get(ckL)) || 0; } catch (e) {}
         if (!sameL && (Date.now() - lastL >= RULES.cooldownMin * 60 * 1000)) {
-          var okL = await applySpendCap(c, tokens, r.spend, RULES.limSpendCap);
+          /* target da regra = teto alvo: sem venda -> limSpendCap($140); ROAS<=1,3 -> gasto de hoje (para no minimo da Meta). */
+          var okL = await applySpendCap(c, tokens, r.spend, (typeof r.target === 'number' && r.target > 0) ? r.target : RULES.limSpendCap);
           if (okL) {
             try { await env.RULES_KV.put(ckL, String(Date.now())); } catch (e) {}
             appliedMap[c.id] = { sig: 'LIMITAR_GASTO', action: r.action, t: Date.now(), day: today };
@@ -514,9 +524,24 @@ async function run(env) {
         histDirty = true;
       }
     }
+    /* Rastreio de PAUSA p/ o aviso de reativar ANTES de 1h: campanha ativa -> limpa o registro;
+       pausada ha >= pauseAlertMin(50) min (janela de 20 min) e ROAS>minRoas(1,3) -> entra no aviso. */
+    var isActiveC = (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE';
+    if (isActiveC) { if (pausedAt[c.id]) { delete pausedAt[c.id]; pausedAtDirty = true; } }
+    else if (pausedAt[c.id]) {
+      var elapP = Date.now() - pausedAt[c.id];
+      if (elapP >= RULES.pauseAlertMin * 60000 && elapP < (RULES.pauseAlertMin + 20) * 60000 && r.roas > RULES.minRoas) {
+        reactList.push({ id: c.id, name: c.name, mins: Math.round(elapP / 60000), roas: +r.roas.toFixed(2) });
+      }
+    }
   }
   if (appliedDirty) { try { await env.RULES_KV.put('applied', JSON.stringify(appliedMap)); } catch (e) {} }
   if (histDirty) { try { await env.RULES_KV.put('histLog', JSON.stringify(histLog)); } catch (e) {} }
+  if (pausedAtDirty) {
+    var cutPa = Date.now() - (RULES.pauseAlertMin + 60) * 60000; /* poda registros antigos */
+    var cleanPa = {}; Object.keys(pausedAt).forEach(function (k) { if (pausedAt[k] >= cutPa) cleanPa[k] = pausedAt[k]; });
+    try { await env.RULES_KV.put('pausedAt', JSON.stringify(cleanPa)); } catch (e) {}
+  }
 
   /* ── TELEGRAM: campanhas que PAUSARAM (live) ou que PAUSARIAM (dry). 1x/dia por campanha (anti-spam). ── */
   if (env.TG_TOKEN && env.TG_CHAT) {
@@ -548,6 +573,18 @@ async function run(env) {
         if (linesL.length > 25) showL.push('…e mais ' + (linesL.length - 25) + ' campanha(s).');
         var headL = liveMode ? '\u{1F6A7} Robô LIMITOU o gasto de ' : '⚠️ Robô LIMITARIA o gasto (dry) de ';
         await sendTelegram(env, headL + linesL.length + ' campanha(s):\n\n' + showL.join('\n\n'));
+      }
+      /* REATIVAR: pausadas ha ~pauseAlertMin min (ROAS>1,3). Avisa 1x por pausa (chave por dia). */
+      var linesR = [];
+      for (var ri = 0; ri < reactList.length; ri++) {
+        var rr = reactList[ri];
+        var rk = rr.id + ':react';
+        if (newSent[rk] !== today) { linesR.push('• ' + rr.name + '\n   pausada ha ~' + rr.mins + ' min · ROAS ' + rr.roas.toFixed(2) + ' — REATIVE antes de 1h'); newSent[rk] = today; }
+      }
+      if (linesR.length) {
+        var showR = linesR.slice(0, 25);
+        if (linesR.length > 25) showR.push('…e mais ' + (linesR.length - 25) + ' campanha(s).');
+        await sendTelegram(env, '⏰ REATIVAR ' + linesR.length + ' campanha(s) pausada(s) ha ~' + RULES.pauseAlertMin + ' min:\n\n' + showR.join('\n\n'));
       }
       try { await env.RULES_KV.put('tgSent', JSON.stringify(newSent)); } catch (e) {}
     } catch (e) { DIAG.tgErr = String((e && e.message) || e); }
