@@ -397,20 +397,21 @@ async function applySpendCap(c, tokens, todaySpend, limCap) {
     var life = byLife[active[i].id] || 0;
     var capCents = Math.round(life * 100) + Math.max(1, Math.round(share * 100)); /* >= gasto do conjunto + fatia da folga */
     var adId = active[i].id;
-    var doPost = function (a, ce) { return function (tk) { return postForm(a, tk, { lifetime_spend_cap: ce }); }; };
-    try {
-      await withTokenFallback(tokens, c._tk, doPost(adId, capCents));
-      okAny = true;
-    } catch (e1) {
-      /* Facebook recusou por estar abaixo do minimo dele -> le o minimo da msg e repete. */
-      var mn = metaMinCapCents(e1 && e1.message);
-      if (mn && mn > capCents) {
-        /* MEDICAO: guarda o par (gasto do conjunto -> minimo exigido) p/ confirmar o fator (~1,33) no /run. */
-        try {
-          DIAG.capMins = DIAG.capMins || [];
-          if (DIAG.capMins.length < 20) DIAG.capMins.push({ ad: adId, gasto: +life.toFixed(2), min: +((mn - 50) / 100).toFixed(2), fator: life > 0 ? +(((mn - 50) / 100) / life).toFixed(3) : null });
-        } catch (e3) {}
-        try { await withTokenFallback(tokens, c._tk, doPost(adId, mn)); okAny = true; } catch (e2) {}
+    /* Aplica no conjunto usando SO o token da campanha. Se recusar por estar abaixo do minimo,
+       LE o minimo da msg e repete com ele (com margem) — ate 3x (o minimo sobe conforme o gasto cresce). */
+    var okThis = false, capV = capCents, measured = false;
+    for (var t = 0; t < 4 && !okThis; t++) {
+      try {
+        await postForm(adId, c._tk, { lifetime_spend_cap: capV });
+        okThis = true; okAny = true;
+      } catch (eC) {
+        var mn = metaMinCapCents(eC && eC.message);
+        if (!measured && mn) { /* MEDICAO 1x por conjunto: gasto -> minimo (confirmar fator no /run). */
+          try { DIAG.capMins = DIAG.capMins || []; if (DIAG.capMins.length < 20) DIAG.capMins.push({ ad: adId, gasto: +life.toFixed(2), min: +(mn / 100).toFixed(2), fator: life > 0 ? +((mn / 100) / life).toFixed(3) : null }); } catch (e3) {}
+          measured = true;
+        }
+        if (mn && mn > capV) { capV = mn; continue; } /* tenta de novo com o minimo (+margem ja embutida) */
+        break; /* erro que nao e "minimo" -> desiste desse conjunto */
       }
     }
   }
@@ -418,7 +419,8 @@ async function applySpendCap(c, tokens, todaySpend, limCap) {
 }
 
 /* Le o MINIMO que o Facebook exige quando recusa um lifetime_spend_cap baixo
-   ("...deve ser de pelo menos US$92,92") -> centavos + 50 de margem. pt-BR e en. 0 se nao achar. */
+   ("...deve ser de pelo menos US$92,92") -> centavos com MARGEM (+3% e +$1), pois o gasto cresce
+   entre ler e aplicar. pt-BR e en. 0 se nao achar. */
 function metaMinCapCents(msg) {
   msg = String(msg || '');
   var m = msg.match(/pelo menos[^\d]*([\d.,]+)/i) || msg.match(/at least[^\d]*([\d.,]+)/i) || msg.match(/US?\$\s*([\d.,]+)/);
@@ -427,7 +429,7 @@ function metaMinCapCents(msg) {
   if (num.indexOf(',') >= 0) num = num.replace(/\./g, '').replace(',', '.');
   var v = parseFloat(num);
   if (!isFinite(v) || v <= 0) return 0;
-  return Math.ceil(v * 100) + 50;
+  return Math.ceil(v * 100 * 1.03) + 100;
 }
 
 /* ---------- execução principal ---------- */
