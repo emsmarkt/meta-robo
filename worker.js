@@ -652,6 +652,15 @@ export default {
       return jsonResp(hist);
     }
 
+    /* Aviso avulso vindo do dashboard (ex.: erro ao aplicar regra) -> encaminha pro Telegram. */
+    if (path === '/notify' && request.method === 'POST') {
+      var nb = {}; try { nb = await request.json(); } catch (e) {}
+      var ntxt = (nb && nb.text) ? String(nb.text).slice(0, 3500) : '';
+      var sentN = false;
+      if (ntxt) { try { await sendTelegram(env, ntxt); sentN = true; } catch (e) {} }
+      return jsonResp({ ok: sentN });
+    }
+
     if (path === '/run') { var r = await run(env); return jsonResp(r); }
 
     var last = null; try { last = await env.RULES_KV.get('lastRun'); } catch (e) {}
