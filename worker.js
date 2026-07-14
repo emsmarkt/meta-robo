@@ -7,6 +7,8 @@
 var API = 'https://graph.facebook.com/v21.0';
 var RT_API = 'https://api.redtrack.io';
 var DIAG = {}; // diagnostico da ultima coleta (aparece no /run)
+var BLOCKED = [];     // contas BLOQUEADAS (status 2) que gastaram nos ult. 7 dias (p/ alerta Telegram)
+var ACCT_STATUS = {}; // id da conta -> account_status atual (p/ resetar o "ja avisei" quando reativa)
 
 /* Config das regras — padroes (iguais ao dashboard). Podem ser sobrescritos por VARIAVEIS
    do Cloudflare (R_*), pra ajustar sem mexer no codigo. Veja buildRules(env). */
@@ -262,6 +264,30 @@ async function collect(env) {
   for (var ti = 0; ti < tokens.length; ti++) {
     var list = await fjPaged(API + '/me/adaccounts?fields=name,account_status&limit=100&access_token=' + tokens[ti]);
     list.forEach(function (a) { var id = a.id.replace('act_', ''); if (!map[id]) { map[id] = a; map[id]._tk = tokens[ti]; } });
+  }
+  /* Mapa de status atual (p/ resetar o "ja avisei" quando a conta volta a ativa). */
+  ACCT_STATUS = {}; Object.keys(map).forEach(function (id) { ACCT_STATUS[id] = map[id].account_status; });
+  /* CONTAS BLOQUEADAS (account_status 2 = DISABLED) que GASTARAM nos ultimos 7 dias.
+     Gasto 7d em LOTE (Batch API) p/ nao estourar subrequests (pode haver dezenas de contas status 2). */
+  BLOCKED = [];
+  var blk = Object.values(map).filter(function (a) { return a.account_status === 2; });
+  var byTkB = {}; blk.forEach(function (a) { (byTkB[a._tk] = byTkB[a._tk] || []).push(a); });
+  for (var tkB in byTkB) {
+    var listB = byTkB[tkB];
+    for (var iB = 0; iB < listB.length; iB += 50) {
+      var chunkB = listB.slice(iB, iB + 50);
+      var batchB = chunkB.map(function (a) { return { method: 'GET', relative_url: a.id + '/insights?fields=spend&date_preset=last_7d&level=account' }; });
+      try {
+        var bodyB = new URLSearchParams(); bodyB.append('batch', JSON.stringify(batchB)); bodyB.append('access_token', tkB);
+        var respB = await fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: bodyB.toString() });
+        var arrB = await respB.json();
+        if (Array.isArray(arrB)) arrB.forEach(function (item, idx) {
+          var a = chunkB[idx], sp7 = 0;
+          try { var bb = JSON.parse(item.body); sp7 = (bb.data && bb.data[0]) ? parseFloat(bb.data[0].spend) || 0 : 0; } catch (e) {}
+          if (sp7 > 0) BLOCKED.push({ id: a.id.replace('act_', ''), name: a.name || a.id, spend7d: Math.round(sp7) });
+        });
+      } catch (e) {}
+    }
   }
   var accounts = Object.values(map).filter(function (acc) { var an = (acc.name || '').toLowerCase(); return an.indexOf('effective 01') < 0 && an.indexOf('origin') < 0; });
   var camps = [];
@@ -589,8 +615,27 @@ async function run(env) {
         await sendTelegram(env, '⏰ REATIVAR ' + linesR.length + ' campanha(s) pausada(s) ha ~' + RULES.pauseAlertMin + ' min:\n\n' + showR.join('\n\n'));
       }
       try { await env.RULES_KV.put('tgSent', JSON.stringify(newSent)); } catch (e) {}
+
+      /* CONTA BLOQUEADA (status 2) que gastou nos ult. 7 dias -> avisa 1x SO (ate a conta voltar a ativa).
+         Anti-spam separado do tgSent (nao e por dia): KV 'blockedNotified' = { id: true }. */
+      var bNotif = {}; try { var bs = await env.RULES_KV.get('blockedNotified'); if (bs) { var bj = JSON.parse(bs); if (bj && typeof bj === 'object') bNotif = bj; } } catch (e) {}
+      var bDirty = false;
+      /* reseta o "ja avisei" das contas que voltaram a ATIVA (status 1) -> se bloquear de novo, avisa de novo. */
+      Object.keys(bNotif).forEach(function (id) { if (ACCT_STATUS[id] === 1) { delete bNotif[id]; bDirty = true; } });
+      var linesB = [];
+      for (var bi = 0; bi < BLOCKED.length; bi++) {
+        var ba = BLOCKED[bi];
+        if (!bNotif[ba.id]) { linesB.push('• ' + ba.name + '\n   gastou $' + ba.spend7d + ' nos ult. 7 dias'); bNotif[ba.id] = today; bDirty = true; }
+      }
+      if (linesB.length) {
+        var showB = linesB.slice(0, 25);
+        if (linesB.length > 25) showB.push('…e mais ' + (linesB.length - 25) + ' conta(s).');
+        await sendTelegram(env, '\u{1F6AB} CONTA BLOQUEADA — ' + linesB.length + ' conta(s) que estava(m) gastando:\n\n' + showB.join('\n\n'));
+      }
+      if (bDirty) { try { await env.RULES_KV.put('blockedNotified', JSON.stringify(bNotif)); } catch (e) {} }
     } catch (e) { DIAG.tgErr = String((e && e.message) || e); }
   }
+  DIAG.blocked = BLOCKED.length; /* visivel no /run */
 
   var log = { at: new Date().toISOString(), mode: env.APPLY_MODE || 'dry', mood: moodObj.mood, moodRoas: +moodObj.roas.toFixed(2), count: camps.length, diag: DIAG, actions: actions };
   try { await env.RULES_KV.put('lastRun', JSON.stringify(log)); } catch (e) {}
