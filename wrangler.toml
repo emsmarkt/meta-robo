@@ -19,7 +19,7 @@ id = "62fa6d5180d6403f81a5485e1e77d5ea"
 #   TG_CHAT  = seu chat id (do @userinfobot) — pode ser var normal.
 # Sem esses dois, os alertas ficam desligados (o resto do robo roda igual).
 [vars]
-APPLY_MODE = "live"
+APPLY_MODE = "dry"
 RT_PTYPE = "1"
 RT_ICTYPE = "2"
 
