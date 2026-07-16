@@ -524,7 +524,8 @@ async function run(env) {
           }
         }
       }
-    } else if ((env.APPLY_MODE || 'dry') === 'live' && r.newEnd && r.key) {
+    } else if ((env.APPLY_MODE || 'dry') === 'live' && r.newEnd && r.key && r.key !== 'AUMENTAR') {
+      /* AUMENTAR fica de FORA do auto-apply (usuario faz manual pelo dashboard). O robo so sugere. */
       var prev = appliedMap[c.id];
       var sameAsLast = prev && prev.day === today && prev.sig === r.key; // a ULTIMA aplicada hoje ja foi essa mesma regra -> nao repete (mas reaplica se mudou e voltou)
       var ck = 'cd:' + c.id, last = 0;
