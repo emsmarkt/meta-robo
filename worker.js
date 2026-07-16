@@ -257,12 +257,14 @@ async function batchAdsetCaps(camps) {
             try {
               var b = JSON.parse(item.body); var sets = b.data || [];
               c._adsets = sets;
-              /* Teto >= orcamento total da campanha = "sem limite" (e assim que o Remover do dash libera). */
-              var lbC = parseInt(c.lifetime_budget) || 0;
-              c._hasCap = sets.some(function (s) {
+              /* LIMITADA? Teste pelo GASTO, nao pelo orcamento: um teto so LIMITA se estiver perto do que a
+                 campanha ja gastou (o robo trava em ~1,33x). Teto muito acima do gasto nao trava nada. */
+              var sumCaps = 0, anyCap = false;
+              sets.forEach(function (s) {
                 var cap = (s.lifetime_spend_cap != null) ? +s.lifetime_spend_cap : 0;
-                return cap > 0 && (lbC <= 0 || cap < lbC);
+                if (cap > 0) { anyCap = true; sumCaps += cap / 100; }
               });
+              c._hasCap = anyCap && sumCaps < Math.max((c._spend || 0) * 2, 20);
             } catch (e) { c._adsets = []; c._hasCap = false; }
           });
         }
@@ -711,15 +713,6 @@ export default {
       }
       var hist = []; try { var hs = await env.RULES_KV.get('histLog'); if (hs) { var ph2 = JSON.parse(hs); if (Array.isArray(ph2)) hist = ph2; } } catch (e) {}
       return jsonResp(hist);
-    }
-
-    /* Aviso avulso vindo do dashboard (ex.: erro ao aplicar regra) -> encaminha pro Telegram. */
-    if (path === '/notify' && request.method === 'POST') {
-      var nb = {}; try { nb = await request.json(); } catch (e) {}
-      var ntxt = (nb && nb.text) ? String(nb.text).slice(0, 3500) : '';
-      var sentN = false;
-      if (ntxt) { try { await sendTelegram(env, ntxt); sentN = true; } catch (e) {} }
-      return jsonResp({ ok: sentN });
     }
 
     if (path === '/run') { var r = await run(env); return jsonResp(r); }
