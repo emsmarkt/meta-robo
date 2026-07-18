@@ -27,6 +27,7 @@ var RULES = {
   limTrigDay: 45, limCapDay: 60,
   limTrigNight: 106, limCapNight: 140,
   limRoas: 1.4, // COM venda: ROAS <= isso -> LIMITAR, INDEPENDENTE do nº de vendas.
+  limMinSpend: 1, // SO limita por ROAS se gasto > isso. Evita o falso ROAS 0 na virada (venda sincroniza antes do gasto).
   pauseRoas: 1.5, escRoas: 1.7, escPct: 0.20, pauseSalesBreak: 3, // 1-3 vd: pausa ROAS<1,5; >3 vd: pausa ROAS<=1,3; ROAS>1,7 e 3+ vd -> +20%. Reativa: ROAS>1,5
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
@@ -48,7 +49,7 @@ function buildRules(env) {
     limHour: n('R_LIMHOUR', 18),
     limTrigDay: n('R_LIMTRIGDAY', 45), limCapDay: n('R_LIMCAPDAY', 60),
     limTrigNight: n('R_LIMTRIGNIGHT', 106), limCapNight: n('R_LIMCAPNIGHT', 140),
-    limRoas: n('R_LIMROAS', 1.4),
+    limRoas: n('R_LIMROAS', 1.4), limMinSpend: n('R_LIMMINSPEND', 1),
     excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 12),
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70), aumMaxSales: n('R_AUMMAXSALES', 5),
     scaleUsePct: n('R_SCALEUSEPCT', 0.2), releaseDaily: n('R_RELEASE', 500),
@@ -194,7 +195,7 @@ function suggestRule(c, mood) {
   }
   /* COM VENDA: ROAS <= limRoas(1,4) -> LIMITAR no GASTO DE HOJE, INDEPENDENTE do nº de vendas.
      1-3 vendas com 1,4 < ROAS < pauseRoas(1,5) -> PAUSAR (UNICA pausa; run() avisa aos ~50min p/ reativar). */
-  if (roas <= RULES.limRoas) return { action: 'LIMITAR GASTO no atual (ROAS ' + roas.toFixed(2) + ' <= ' + RULES.limRoas + ', ' + sales + ' vendas, $' + Math.round(sp) + ' hoje)', key: 'LIMITAR_GASTO', target: sp, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
+  if (roas <= RULES.limRoas && sp > RULES.limMinSpend) return { action: 'LIMITAR GASTO no atual (ROAS ' + roas.toFixed(2) + ' <= ' + RULES.limRoas + ', ' + sales + ' vendas, $' + Math.round(sp) + ' hoje)', key: 'LIMITAR_GASTO', target: sp, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   if (sales <= RULES.pauseSalesBreak && roas < RULES.pauseRoas) return { action: 'PAUSAR (ROAS ' + roas.toFixed(2) + ' < ' + RULES.pauseRoas + ', ' + sales + ' venda)', key: 'PAUSAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   /* Nao pausou. >5 vendas (aumMaxSales) -> MANTER (escala/gestao MANUAL, robo nao mexe). */
   if (sales > RULES.aumMaxSales) return { action: 'MANTER (>' + RULES.aumMaxSales + ' vendas, ROAS ' + roas.toFixed(2) + ' — gestao manual)', key: 'MANTER', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
@@ -271,6 +272,39 @@ async function batchAdsetCaps(camps) {
       } catch (e) {}
     }
   }
+}
+
+/* VIRADA DO DIA: remove o limite de gasto de TODAS as campanhas limitadas (setando o cap dos conjuntos
+   = orcamento vitalicio da campanha = sem limite na pratica), p/ rodarem de novo no dia novo. Em LOTE
+   (Batch API, POST) p/ nao estourar subrequests. Devolve quantos conjuntos foram liberados. */
+async function removeCapsForNewDay(camps) {
+  var byTk = {}, count = 0;
+  camps.forEach(function (c) {
+    if (!c._hasCap) return;
+    var lb = parseInt(c.lifetime_budget) || 0;
+    if (lb <= 0) return; /* sem orcamento vitalicio: nao mexe */
+    (c._adsets || []).forEach(function (s) {
+      var cap = (s.lifetime_spend_cap != null) ? +s.lifetime_spend_cap : 0;
+      if (cap > 0) { (byTk[c._tk] = byTk[c._tk] || []).push({ id: s.id, val: lb }); }
+    });
+  });
+  for (var tk in byTk) {
+    var ops = byTk[tk];
+    for (var i = 0; i < ops.length; i += 50) {
+      var chunk = ops.slice(i, i + 50);
+      var batch = chunk.map(function (o) { return { method: 'POST', relative_url: String(o.id), body: 'lifetime_spend_cap=' + o.val }; });
+      try {
+        var body = new URLSearchParams();
+        body.append('batch', JSON.stringify(batch));
+        body.append('access_token', tk);
+        await fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() });
+        count += chunk.length;
+      } catch (e) {}
+    }
+  }
+  /* marca em memoria como nao-limitadas p/ rodarem normal ja neste ciclo */
+  camps.forEach(function (c) { if (c._hasCap) c._hasCap = false; });
+  return count;
 }
 
 /* ---------- coleta dados (Meta + RedTrack) ---------- */
@@ -494,6 +528,17 @@ async function run(env) {
   var histLog = []; try { var hl = await env.RULES_KV.get('histLog'); if (hl) { var ph = JSON.parse(hl); if (Array.isArray(ph)) histLog = ph; } } catch (e) {}
   var histDirty = false;
   var appliedDirty = false, today = brDatePlus(0);
+  /* VIRADA DO DIA: no 1o ciclo de um DIA NOVO, remove o limite de gasto de TODAS as limitadas p/ rodarem
+     de novo (ciclo diario). 1x por dia (KV capResetDay). Depois seguem as regras normais neste mesmo ciclo. */
+  var capReset = null; try { capReset = await env.RULES_KV.get('capResetDay'); } catch (e) {}
+  if (capReset !== today) {
+    var toClear = camps.filter(function (c) { return c._hasCap; });
+    DIAG.capReset = { day: today, limitadas: toClear.length, mode: env.APPLY_MODE || 'dry' };
+    if ((env.APPLY_MODE || 'dry') === 'live') {
+      if (toClear.length) { DIAG.capReset.conjuntosLiberados = await removeCapsForNewDay(toClear); }
+      try { await env.RULES_KV.put('capResetDay', today); } catch (e) {}
+    }
+  }
   var actions = [];
   var pausedList = []; /* campanhas pausadas neste ciclo (p/ alerta Telegram) */
   var limitedList = []; /* campanhas que receberam LIMITE DE GASTO neste ciclo (p/ alerta Telegram) */
