@@ -20,12 +20,9 @@ var RULES = {
      >2 vendas E dia BOM -> accGood(1.35); >2 vendas dia nao-bom -> accBase(1.5). */
   accBase: 1.5, accGood: 1.35, accGoodMinSales: 2,
   cutNoSaleSpend: 100,
-  /* SEM venda: teto por HORARIO (BR). A Meta forca travar em ~1,33x o gasto, entao o gatilho e o teto/1,33.
-     Antes das limHour(18h): dispara em 45 -> trava ~$60. A partir das 18h: dispara em 106 -> trava ~$140.
-     As 18h o robo SOBE o teto das ja limitadas sem venda de 60 -> 140 (SUBIR_LIMITE). */
-  limHour: 18,
-  limTrigDay: 45, limCapDay: 60,
-  limTrigNight: 106, limCapNight: 140,
+  /* SEM venda: gasto >= limSpendTrigger($90) -> LIMITAR, trava ~$120 o DIA INTEIRO (sem horario).
+     A Meta forca travar em ~1,33x o gasto, entao 90 x 1,33 ~= 120 (teto real). */
+  limSpendTrigger: 90, limSpendCap: 120,
   limRoas: 1.4, // COM venda: ROAS <= isso -> LIMITAR, INDEPENDENTE do nº de vendas.
   limMinSpend: 1, // SO limita por ROAS se gasto > isso. Evita o falso ROAS 0 na virada (venda sincroniza antes do gasto).
   pauseRoas: 1.5, escRoas: 1.7, escPct: 0.20, pauseSalesBreak: 3, // 1-3 vd: pausa ROAS<1,5; >3 vd: pausa ROAS<=1,3; ROAS>1,7 e 3+ vd -> +20%. Reativa: ROAS>1,5
@@ -46,9 +43,7 @@ function buildRules(env) {
     accBase: n('R_ACCBASE', 1.5), accGood: n('R_ACCGOOD', 1.35), accGoodMinSales: n('R_ACCGOODMINSALES', 2),
     cutNoSaleSpend: n('R_CUTNOSALE', 100),
     pauseRoas: n('R_PAUSEROAS', 1.5), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
-    limHour: n('R_LIMHOUR', 18),
-    limTrigDay: n('R_LIMTRIGDAY', 45), limCapDay: n('R_LIMCAPDAY', 60),
-    limTrigNight: n('R_LIMTRIGNIGHT', 106), limCapNight: n('R_LIMCAPNIGHT', 140),
+    limSpendTrigger: n('R_LIMTRIG', 90), limSpendCap: n('R_LIMCAP', 120),
     limRoas: n('R_LIMROAS', 1.4), limMinSpend: n('R_LIMMINSPEND', 1),
     excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 12),
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70), aumMaxSales: n('R_AUMMAXSALES', 5),
@@ -173,23 +168,16 @@ function suggestRule(c, mood) {
     if (sales >= 1 && roas > RULES.pauseRoas) return { action: 'ATIVAR (ROAS ' + roas.toFixed(2) + ' > ' + RULES.pauseRoas + ')', key: 'ATIVAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
     return { action: 'PAUSADA', key: 'PAUSADA', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   }
-  /* Teto SEM venda por HORARIO (BR): antes de limHour(18h) -> limCapDay($60, dispara em limTrigDay $45);
-     a partir das 18h -> limCapNight($140, dispara em limTrigNight $106). */
-  var isNight = brHour() >= RULES.limHour;
-  var trigNS = isNight ? RULES.limTrigNight : RULES.limTrigDay;
-  var capNS = isNight ? RULES.limCapNight : RULES.limCapDay;
   /* LIMITADA: campanha ATIVA com limite de gasto no conjunto (lifetime_spend_cap) = soft-stop.
-     Voltou a vender -> REMLIMITE (SO manual no dashboard; o robo NUNCA remove).
-     Sem venda e ja passou das 18h com teto de dia ($60) -> SUBIR_LIMITE p/ $140 (robo sobe, nunca remove). */
+     Voltou a vender -> REMLIMITE (SO manual no dashboard; o robo NUNCA remove mid-dia; so na virada). */
   if (c._hasCap) {
     if (sales >= 1) return { action: 'REMOVER LIMITE (vendeu — ROAS ' + roas.toFixed(2) + ', ' + sales + ' venda)', key: 'REMLIMITE', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
-    if (isNight && sp < RULES.limCapNight) return { action: 'SUBIR LIMITE p/ ~$' + RULES.limCapNight + ' (pos ' + RULES.limHour + 'h, s/ venda, $' + Math.round(sp) + ' hoje)', key: 'SUBIR_LIMITE', target: RULES.limCapNight, newEnd: null, cpa: null, roas: 0, sales: 0, spend: sp };
     return { action: 'Limite de gasto ativo (parada, sem venda)', key: 'REMLIMITE', target: null, newEnd: null, cpa: null, roas: 0, sales: 0, spend: sp };
   }
-  /* 0 VENDA: gasto >= gatilho do horario -> LIMITAR GASTO (teto do horario).
+  /* 0 VENDA: gasto >= limSpendTrigger($90) -> LIMITAR GASTO (trava ~$120 o dia inteiro).
      CPC ruim (>pauseCpc$3, 0 IC, >pauseSpend$60) -> LIMITAR no gasto de hoje. Senao Coletando. */
   if (sales === 0) {
-    if (sp >= trigNS) return { action: 'LIMITAR GASTO (trava ~$' + capNS + ', ' + (isNight ? 'pos ' : 'ate ') + RULES.limHour + 'h, $' + Math.round(sp) + ' hoje s/ venda)', key: 'LIMITAR_GASTO', target: capNS, newEnd: null, cpa: null, roas: 0, sales: 0, spend: sp };
+    if (sp >= RULES.limSpendTrigger) return { action: 'LIMITAR GASTO (trava ~$' + RULES.limSpendCap + ', $' + Math.round(sp) + ' hoje s/ venda)', key: 'LIMITAR_GASTO', target: RULES.limSpendCap, newEnd: null, cpa: null, roas: 0, sales: 0, spend: sp };
     if (ic === 0 && cpc > RULES.pauseCpc && sp > RULES.pauseSpend) return { action: 'LIMITAR GASTO (CPC ' + (isFinite(cpc) ? '$' + cpc.toFixed(2) : 'alto/0 cliques') + ' s/ venda, $' + Math.round(sp) + ' hoje)', key: 'LIMITAR_GASTO', target: sp, newEnd: null, cpa: null, roas: 0, sales: 0, spend: sp };
     return { action: 'COLETANDO', key: 'COLETANDO', target: null, newEnd: null, cpa: Infinity, roas: 0, sales: 0, spend: sp };
   }
@@ -563,10 +551,9 @@ async function run(env) {
           histDirty = true;
         } catch (e) {}
       }
-    } else if (r.key === 'LIMITAR_GASTO' || r.key === 'SUBIR_LIMITE') {
-      /* ── LIMITAR GASTO (soft-stop) e SUBIR_LIMITE (as 18h sobe o teto sem-venda de $60 -> $140).
-         Aplica lifetime_spend_cap nos conjuntos (live, campanha ativa, respeitando cooldown). NAO pausa.
-         REMLIMITE fica de fora (remocao SO manual). ── */
+    } else if (r.key === 'LIMITAR_GASTO') {
+      /* ── LIMITAR GASTO (soft-stop): aplica lifetime_spend_cap nos conjuntos (live, campanha ativa,
+         respeitando cooldown). NAO pausa. REMLIMITE fica de fora (remocao SO manual / virada). ── */
       limitedList.push({ id: c.id, name: c.name, action: r.action });
       if ((env.APPLY_MODE || 'dry') === 'live' && (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') {
         var prevL = appliedMap[c.id];
@@ -574,8 +561,8 @@ async function run(env) {
         var ckL = 'cd:' + c.id, lastL = 0;
         try { lastL = parseInt(await env.RULES_KV.get(ckL)) || 0; } catch (e) {}
         if (!sameL && (Date.now() - lastL >= RULES.cooldownMin * 60 * 1000)) {
-          /* target = teto alvo: sem venda -> teto do horario ($60 ate 18h, $140 depois); ROAS<=1,4 -> gasto de hoje. */
-          var okL = await applySpendCap(c, tokens, r.spend, (typeof r.target === 'number' && r.target > 0) ? r.target : RULES.limCapNight);
+          /* target = teto alvo: sem venda -> limSpendCap($100); ROAS<=1,4/CPC -> gasto de hoje. */
+          var okL = await applySpendCap(c, tokens, r.spend, (typeof r.target === 'number' && r.target > 0) ? r.target : RULES.limSpendCap);
           if (okL) {
             try { await env.RULES_KV.put(ckL, String(Date.now())); } catch (e) {}
             appliedMap[c.id] = { sig: r.key, action: r.action, t: Date.now(), day: today };

@@ -19,7 +19,7 @@ id = "62fa6d5180d6403f81a5485e1e77d5ea"
 #   TG_CHAT  = seu chat id (do @userinfobot) — pode ser var normal.
 # Sem esses dois, os alertas ficam desligados (o resto do robo roda igual).
 [vars]
-APPLY_MODE = "dry"
+APPLY_MODE = "live"
 RT_PTYPE = "1"
 RT_ICTYPE = "2"
 
@@ -49,11 +49,8 @@ R_ESCROAS = "1.7"      # aumenta so acima disso (com excMinSales+ vendas)
 R_ESCPCT = "0.20"      # aumento = +20% do diario atual
 R_PAUSESALESBREAK = "3"  # ATE N vendas pausa por R_PAUSEROAS(1,5); ACIMA de N pausa por R_MINROAS(1,3)
 # SEM venda: teto por HORARIO (BR). A Meta forca travar em ~1,33x o gasto, entao gatilho = teto/1,33.
-R_LIMHOUR = "18"        # hora BR da virada. As 18h o robo SOBE o teto das ja limitadas s/ venda ($60 -> $140)
-R_LIMTRIGDAY = "45"     # ANTES das 18h: gasto s/ venda >= isso -> LIMITAR (45 x 1,33 ~= 60)
-R_LIMCAPDAY = "60"      # ...trava em ~$60
-R_LIMTRIGNIGHT = "106"  # A PARTIR das 18h: gasto s/ venda >= isso -> LIMITAR (106 x 1,33 ~= 140)
-R_LIMCAPNIGHT = "140"   # ...trava em ~$140
+R_LIMTRIG = "90"        # SEM venda: gasto >= isso -> LIMITAR (trava ~$120 o dia inteiro; 90 x 1,33 ~= 120)
+R_LIMCAP = "120"        # ...trava a campanha nesse teto de gasto (Maximo total do conjunto)
 R_EXCROAS = "2.0"      # excepcional: ROAS >= isso ...
 R_EXCMINSALES = "3"    # ... com pelo menos N vendas -> escalar
 R_SCALEMULT = "12"     # multiplicador de escala (12x o gasto de hoje; range util 10-15)
