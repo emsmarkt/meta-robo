@@ -25,6 +25,7 @@ var RULES = {
   limSpendTrigger: 90, limSpendCap: 120,
   limRoas: 1.4, // COM venda: ROAS <= isso -> LIMITAR, INDEPENDENTE do nº de vendas.
   limMinSpend: 1, // SO limita por ROAS se gasto > isso. Evita o falso ROAS 0 na virada (venda sincroniza antes do gasto).
+  remLimRoas: 1.5, remLimStart: 10, remLimEnd: 23, // robo REMOVE o limite sozinho se ROAS > 1,5 entre remLimStart(10h) e remLimEnd(23h) BR (campanha recuperou).
   pauseRoas: 1.5, escRoas: 1.7, escPct: 0.20, pauseSalesBreak: 3, // 1-3 vd: pausa ROAS<1,5; >3 vd: pausa ROAS<=1,3; ROAS>1,7 e 3+ vd -> +20%. Reativa: ROAS>1,5
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
@@ -45,6 +46,7 @@ function buildRules(env) {
     pauseRoas: n('R_PAUSEROAS', 1.5), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
     limSpendTrigger: n('R_LIMTRIG', 90), limSpendCap: n('R_LIMCAP', 120),
     limRoas: n('R_LIMROAS', 1.4), limMinSpend: n('R_LIMMINSPEND', 1),
+    remLimRoas: n('R_REMLIMROAS', 1.5), remLimStart: n('R_REMLIMSTART', 10), remLimEnd: n('R_REMLIMEND', 23),
     excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 12),
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70), aumMaxSales: n('R_AUMMAXSALES', 5),
     scaleUsePct: n('R_SCALEUSEPCT', 0.2), releaseDaily: n('R_RELEASE', 500),
@@ -169,8 +171,12 @@ function suggestRule(c, mood) {
     return { action: 'PAUSADA', key: 'PAUSADA', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   }
   /* LIMITADA: campanha ATIVA com limite de gasto no conjunto (lifetime_spend_cap) = soft-stop.
-     Voltou a vender -> REMLIMITE (SO manual no dashboard; o robo NUNCA remove mid-dia; so na virada). */
+     RECUPEROU (ROAS > remLimRoas 1,5) E dentro da janela (remLimStart 3h .. remLimEnd 23h BR) ->
+     o robo REMOVE sozinho (REMLIMITE_AUTO). Senao: vendeu -> REMLIMITE (manual no dash); parada. */
   if (c._hasCap) {
+    var hNow = brHour();
+    var remWindow = hNow >= RULES.remLimStart && hNow < RULES.remLimEnd;
+    if (roas > RULES.remLimRoas && remWindow) return { action: 'REMOVER LIMITE AUTO (ROAS ' + roas.toFixed(2) + ' > ' + RULES.remLimRoas + ', ' + hNow + 'h)', key: 'REMLIMITE_AUTO', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
     if (sales >= 1) return { action: 'REMOVER LIMITE (vendeu — ROAS ' + roas.toFixed(2) + ', ' + sales + ' venda)', key: 'REMLIMITE', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
     return { action: 'Limite de gasto ativo (parada, sem venda)', key: 'REMLIMITE', target: null, newEnd: null, cpa: null, roas: 0, sales: 0, spend: sp };
   }
@@ -531,6 +537,7 @@ async function run(env) {
   var pausedList = []; /* campanhas pausadas neste ciclo (p/ alerta Telegram) */
   var limitedList = []; /* campanhas que receberam LIMITE DE GASTO neste ciclo (p/ alerta Telegram) */
   var reactList = [];  /* pausadas ha ~pauseAlertMin min (ROAS>1,3) -> aviso Telegram p/ reativar antes de 1h */
+  var unlimitedList = []; /* limite REMOVIDO pelo robo (recuperou ROAS>1,5 na janela) -> aviso Telegram */
   /* Momento em que o robo pausou cada campanha (KV) -> base do aviso "reative antes de 1h". */
   var pausedAt = {}; try { var pa = await env.RULES_KV.get('pausedAt'); if (pa) { var pj = JSON.parse(pa); if (pj && typeof pj === 'object') pausedAt = pj; } } catch (e) {}
   var pausedAtDirty = false;
@@ -547,6 +554,19 @@ async function run(env) {
           await withTokenFallback(tokens, c._tk, function (tk) { return postForm(c.id, tk, { status: 'PAUSED' }); });
           pausedAt[c.id] = Date.now(); pausedAtDirty = true; /* base do aviso "reative antes de 1h" */
           histLog.unshift({ id: c.id, name: c.name, t: Date.now(), day: today, sig: 'PAUSAR', action: r.action, roas: +r.roas.toFixed(2), sales: r.sales, spend: Math.round(r.spend), dailyNew: null, endNew: null, source: 'robo', tkId: (c._tk ? String(c._tk).slice(-6) : '') });
+          if (histLog.length > 500) histLog = histLog.slice(0, 500);
+          histDirty = true;
+        } catch (e) {}
+      }
+    } else if (r.key === 'REMLIMITE_AUTO') {
+      /* ── RECUPEROU (ROAS>remLimRoas, janela remLimStart..remLimEnd): robo REMOVE o limite sozinho. ── */
+      unlimitedList.push({ id: c.id, name: c.name, roas: +r.roas.toFixed(2) });
+      if ((env.APPLY_MODE || 'dry') === 'live' && (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') {
+        try {
+          await removeCapsForNewDay([c]); /* seta cap = orcamento da campanha (= sem limite) e marca _hasCap=false */
+          appliedMap[c.id] = { sig: 'REMLIMITE_AUTO', action: r.action, t: Date.now(), day: today };
+          appliedDirty = true;
+          histLog.unshift({ id: c.id, name: c.name, t: Date.now(), day: today, sig: 'REMLIMITE_AUTO', action: r.action, roas: +r.roas.toFixed(2), sales: r.sales, spend: Math.round(r.spend), dailyNew: null, endNew: null, source: 'robo', tkId: (c._tk ? String(c._tk).slice(-6) : '') });
           if (histLog.length > 500) histLog = histLog.slice(0, 500);
           histDirty = true;
         } catch (e) {}
@@ -651,6 +671,19 @@ async function run(env) {
         if (linesL.length > 25) showL.push('…e mais ' + (linesL.length - 25) + ' campanha(s).');
         var headL = liveMode ? '\u{1F6A7} Robô LIMITOU o gasto de ' : '⚠️ Robô LIMITARIA o gasto (dry) de ';
         await sendTelegram(env, headL + linesL.length + ' campanha(s):\n\n' + showL.join('\n\n'));
+      }
+      /* LIMITE REMOVIDO pelo robo (recuperou ROAS>1,5 na janela 3h-23h), 1x/dia por campanha. */
+      var linesU = [];
+      for (var ui = 0; ui < unlimitedList.length; ui++) {
+        var uu = unlimitedList[ui];
+        var uk = uu.id + ':unlim';
+        if (newSent[uk] !== today) { linesU.push('• ' + uu.name + '\n   recuperou · ROAS ' + uu.roas.toFixed(2) + ' — limite REMOVIDO, voltou a rodar'); newSent[uk] = today; }
+      }
+      if (linesU.length) {
+        var showU = linesU.slice(0, 25);
+        if (linesU.length > 25) showU.push('…e mais ' + (linesU.length - 25) + ' campanha(s).');
+        var headU = liveMode ? '\u{2705} Robô REMOVEU o limite de ' : '⚠️ Robô REMOVERIA o limite (dry) de ';
+        await sendTelegram(env, headU + linesU.length + ' campanha(s) que recuperou (ROAS>' + RULES.remLimRoas + '):\n\n' + showU.join('\n\n'));
       }
       /* REATIVAR: pausadas ha ~pauseAlertMin min (ROAS>1,3). Avisa 1x por pausa (chave por dia). */
       var linesR = [];
