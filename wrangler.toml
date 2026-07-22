@@ -19,7 +19,7 @@ id = "62fa6d5180d6403f81a5485e1e77d5ea"
 #   TG_CHAT  = seu chat id (do @userinfobot) — pode ser var normal.
 # Sem esses dois, os alertas ficam desligados (o resto do robo roda igual).
 [vars]
-APPLY_MODE = "dry"
+APPLY_MODE = "live"
 RT_PTYPE = "1"
 RT_ICTYPE = "2"
 
@@ -60,8 +60,13 @@ R_EXCMINSALES = "3"    # ... com pelo menos N vendas -> escalar
 R_SCALEMULT = "12"     # multiplicador de escala (12x o gasto de hoje; range util 10-15)
 R_AUMROASLOW = "1.5"   # faixa ROAS bom: inicio
 R_AUMROASHIGH = "1.9"  # faixa ROAS bom: fim
-R_AUMPCTLOW = "0.30"   # +30% no ROAS 1.5
-R_AUMPCTHIGH = "0.70"  # +70% no ROAS 1.9
+R_AUMPCTLOW = "0.30"   # +30% no ROAS 1.5 (regra antiga de AUMENTAR — nao usada mais)
+R_AUMPCTHIGH = "0.70"  # +70% no ROAS 1.9 (regra antiga de AUMENTAR — nao usada mais)
+# AUMENTAR (so SUGESTAO, robo nao aplica): so apos R_AUMHOURBR h BR, ROAS de hoje >= R_PAUSEROAS(1,5)
+# E ROAS dos ultimos 7 dias > R_AUMROAS7D -> sugere subir o diario p/ R_AUMMULT x o atual.
+R_AUMHOURBR = "20"     # so aparece depois dessa hora BR
+R_AUMROAS7D = "1.4"    # exige ROAS dos ultimos 7 dias acima disso
+R_AUMMULT = "1.5"      # sugere diario = 1,5x o atual
 R_SCALEUSEPCT = "0.2"  # so escala se gasto hoje >= isso do diario atual
 R_RELEASE = "500"      # campanha que vende mas esta limitada -> libera p/ esse valor
 R_ALERT3DROAS = "1.0"  # aviso "matar": ROAS dos 3 dias < isso
