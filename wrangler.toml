@@ -19,7 +19,7 @@ id = "62fa6d5180d6403f81a5485e1e77d5ea"
 #   TG_CHAT  = seu chat id (do @userinfobot) — pode ser var normal.
 # Sem esses dois, os alertas ficam desligados (o resto do robo roda igual).
 [vars]
-APPLY_MODE = "dry"
+APPLY_MODE = "live"
 RT_PTYPE = "1"
 RT_ICTYPE = "2"
 
@@ -67,6 +67,7 @@ R_AUMPCTHIGH = "0.70"  # +70% no ROAS 1.9 (regra antiga de AUMENTAR — nao usad
 R_AUMHOURBR = "20"     # so aparece depois dessa hora BR
 R_AUMROAS7D = "1.4"    # exige ROAS dos ultimos 7 dias acima disso
 R_AUMMULT = "1.5"      # sugere diario = 1,5x o atual
+R_AUMCAMPEADIAS = "3"  # campea (>=5 vendas): so sugere AUMENTAR se nao houve aumento nos ult. X dias
 R_SCALEUSEPCT = "0.2"  # so escala se gasto hoje >= isso do diario atual
 R_RELEASE = "500"      # campanha que vende mas esta limitada -> libera p/ esse valor
 R_ALERT3DROAS = "1.0"  # aviso "matar": ROAS dos 3 dias < isso

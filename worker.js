@@ -29,8 +29,9 @@ var RULES = {
   pauseRoas: 1.5, escRoas: 1.7, escPct: 0.20, pauseSalesBreak: 3, // 1-3 vd: pausa ROAS<1,5; >3 vd: pausa ROAS<=1,3; ROAS>1,7 e 3+ vd -> +20%. Reativa: ROAS>1,5
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
-  /* AUMENTAR (so SUGESTAO): so apos aumHourBR(20h) BR, ROAS de HOJE >= pauseRoas(1,5) E ROAS dos ult. 7 dias > aumRoas7dMin(1,4) -> subir o diario p/ aumMult(1,5)x o atual. */
-  aumHourBR: 20, aumRoas7dMin: 1.4, aumMult: 1.5,
+  /* AUMENTAR (so SUGESTAO): so apos aumHourBR(20h) BR, ROAS de HOJE >= pauseRoas(1,5) E ROAS dos ult. 7 dias > aumRoas7dMin(1,4) -> subir o diario p/ aumMult(1,5)x o atual.
+     <aumMaxSales(5) vendas: sempre. Campea (>=5): SO se nao houve aumento nos ult. aumCampeaDays(3) dias. */
+  aumHourBR: 20, aumRoas7dMin: 1.4, aumMult: 1.5, aumCampeaDays: 3,
   alert3dRoas: 1.0, alert3dMinSpend: 150,
   pauseCpc: 3, pauseSpend: 60, pauseAlertMin: 50,  // CPC>$3 E 0 venda/IC E gasto>$60 -> LIMITAR GASTO (soft-stop). pauseAlertMin: min pausada -> avisa p/ reativar
   alertRepeatMin: 10,  // repete o MESMO aviso Telegram da campanha a cada X min enquanto o estado durar (antes era 1x/dia)
@@ -52,7 +53,7 @@ function buildRules(env) {
     remLimRoas: n('R_REMLIMROAS', 1.5), remLimStart: n('R_REMLIMSTART', 10), remLimEnd: n('R_REMLIMEND', 23),
     excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 12),
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70), aumMaxSales: n('R_AUMMAXSALES', 5),
-    aumHourBR: n('R_AUMHOURBR', 20), aumRoas7dMin: n('R_AUMROAS7D', 1.4), aumMult: n('R_AUMMULT', 1.5),
+    aumHourBR: n('R_AUMHOURBR', 20), aumRoas7dMin: n('R_AUMROAS7D', 1.4), aumMult: n('R_AUMMULT', 1.5), aumCampeaDays: n('R_AUMCAMPEADIAS', 3),
     scaleUsePct: n('R_SCALEUSEPCT', 0.2), releaseDaily: n('R_RELEASE', 500),
     alert3dRoas: n('R_ALERT3DROAS', 1.0), alert3dMinSpend: n('R_ALERT3DSPEND', 150),
     pauseCpc: n('R_PAUSECPC', 3), pauseSpend: n('R_PAUSESPEND', 60), pauseAlertMin: n('R_PAUSEALERTMIN', 50), alertRepeatMin: n('R_ALERTREPEAT', 10),
@@ -177,14 +178,17 @@ function suggestRule(c, mood) {
   if (c._hasCap) {
     return { action: 'REMOVER LIMITE (mecanismo aposentado — de volta ao termino)', key: 'REMLIMITE_AUTO', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   }
-  /* AUMENTAR (so SUGESTAO — robo NAO auto-aplica): so em campanha com MENOS de aumMaxSales(5) vendas
-     (campea >=5 vendas = gestao manual, nunca AUMENTAR), DEPOIS das aumHourBR(20h) BR, ROAS de HOJE >= pauseRoas(1,5)
-     E ROAS dos ult. 7 dias > aumRoas7dMin(1,4) -> sugere subir o diario p/ aumMult(1,5)x o atual. */
-  if (sales < RULES.aumMaxSales && brHour() >= RULES.aumHourBR && roas >= RULES.pauseRoas && (c._roas7d || 0) > RULES.aumRoas7dMin && sp > RULES.limMinSpend) {
+  /* AUMENTAR (so SUGESTAO — robo NAO auto-aplica): DEPOIS das aumHourBR(20h) BR, ROAS de HOJE >= pauseRoas(1,5)
+     E ROAS dos ult. 7 dias > aumRoas7dMin(1,4) -> sugere subir o diario p/ aumMult(1,5)x o atual.
+     <aumMaxSales(5) vendas: sempre. Campea (>=5 vendas): SO se nao houve aumento nos ult. aumCampeaDays(3) dias. */
+  var _aumBase = brHour() >= RULES.aumHourBR && roas >= RULES.pauseRoas && (c._roas7d || 0) > RULES.aumRoas7dMin && sp > RULES.limMinSpend;
+  var _incDays = c._lastIncDay ? Math.round((Date.parse(brDatePlus(0)) - Date.parse(c._lastIncDay)) / 86400000) : 9999;
+  if (_aumBase && (sales < RULES.aumMaxSales || _incDays >= RULES.aumCampeaDays)) {
     var baseA = curDaily > 0 ? curDaily : Math.max(sp, RULES.floorDaily);
     var targetA = baseA * RULES.aumMult;
     var newEndA = (targetA && rem > 0) ? brDatePlus(Math.max(1, Math.ceil(rem / targetA))) : null;
-    return { action: 'AUMENTAR diario p/ $' + Math.round(targetA) + ' (' + RULES.aumMult + 'x — ROAS hoje ' + roas.toFixed(2) + ', 7d ' + (c._roas7d || 0).toFixed(2) + ', apos ' + RULES.aumHourBR + 'h)', key: 'AUMENTAR', target: targetA, newEnd: newEndA, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
+    var _cmp = sales >= RULES.aumMaxSales ? ' campea s/ aumento ha ' + (_incDays >= 9999 ? 'nunca' : _incDays + 'd') + ',' : '';
+    return { action: 'AUMENTAR diario p/ $' + Math.round(targetA) + ' (' + RULES.aumMult + 'x —' + _cmp + ' ROAS hoje ' + roas.toFixed(2) + ', 7d ' + (c._roas7d || 0).toFixed(2) + ', apos ' + RULES.aumHourBR + 'h)', key: 'AUMENTAR', target: targetA, newEnd: newEndA, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   }
   /* SEM VENDA: gastou >= cutNoSaleSpend($100) -> CORTAR (+cutDays, reduz o ritmo). Senao COLETANDO. */
   if (sales === 0) {
@@ -544,6 +548,17 @@ async function run(env) {
   /* Historico append-only do robo (lista RICA, cap 500). So cresce quando aplica de verdade (live). */
   var histLog = []; try { var hl = await env.RULES_KV.get('histLog'); if (hl) { var ph = JSON.parse(hl); if (Array.isArray(ph)) histLog = ph; } } catch (e) {}
   var histDirty = false;
+  /* Ultimo AUMENTO por campanha (do historico) — p/ a regra: campea so recebe AUMENTAR se nao aumentou
+     nos ult. aumCampeaDays dias. Aumento = sig AUMENTAR ou entrada com dailyNew > dailyOld. */
+  var lastIncByCamp = {};
+  histLog.forEach(function (e) {
+    if (!e || !e.day) return;
+    var isInc = e.sig === 'AUMENTAR' || (typeof e.dailyNew === 'number' && typeof e.dailyOld === 'number' && e.dailyNew > e.dailyOld);
+    if (!isInc) return;
+    var id = String(e.id);
+    if (!lastIncByCamp[id] || e.day > lastIncByCamp[id]) lastIncByCamp[id] = e.day;
+  });
+  camps.forEach(function (c) { c._lastIncDay = lastIncByCamp[String(c.id)] || null; });
   var appliedDirty = false, today = brDatePlus(0);
   /* VIRADA DO DIA: no 1o ciclo de um DIA NOVO, remove o limite de gasto de TODAS as limitadas p/ rodarem
      de novo (ciclo diario). 1x por dia (KV capResetDay). Depois seguem as regras normais neste mesmo ciclo. */
