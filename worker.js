@@ -31,6 +31,7 @@ var RULES = {
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
   alert3dRoas: 1.0, alert3dMinSpend: 150,
   pauseCpc: 3, pauseSpend: 60, pauseAlertMin: 50,  // CPC>$3 E 0 venda/IC E gasto>$60 -> LIMITAR GASTO (soft-stop). pauseAlertMin: min pausada -> avisa p/ reativar
+  alertRepeatMin: 10,  // repete o MESMO aviso Telegram da campanha a cada X min enquanto o estado durar (antes era 1x/dia)
   cooldownMin: 5       // minutos entre 2 aplicacoes na MESMA campanha (configuravel via R_COOLDOWN). = 1 ciclo do cron
 };
 /* Le os parametros das variaveis do Cloudflare (se existirem), senao usa o padrao acima. */
@@ -51,7 +52,7 @@ function buildRules(env) {
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70), aumMaxSales: n('R_AUMMAXSALES', 5),
     scaleUsePct: n('R_SCALEUSEPCT', 0.2), releaseDaily: n('R_RELEASE', 500),
     alert3dRoas: n('R_ALERT3DROAS', 1.0), alert3dMinSpend: n('R_ALERT3DSPEND', 150),
-    pauseCpc: n('R_PAUSECPC', 3), pauseSpend: n('R_PAUSESPEND', 60), pauseAlertMin: n('R_PAUSEALERTMIN', 50),
+    pauseCpc: n('R_PAUSECPC', 3), pauseSpend: n('R_PAUSESPEND', 60), pauseAlertMin: n('R_PAUSEALERTMIN', 50), alertRepeatMin: n('R_ALERTREPEAT', 10),
     cooldownMin: n('R_COOLDOWN', 5)
   };
 }
@@ -628,7 +629,7 @@ async function run(env) {
     if (isActiveC) { if (pausedAt[c.id]) { delete pausedAt[c.id]; pausedAtDirty = true; } }
     else if (pausedAt[c.id]) {
       var elapP = Date.now() - pausedAt[c.id];
-      if (elapP >= RULES.pauseAlertMin * 60000 && elapP < (RULES.pauseAlertMin + 20) * 60000 && r.roas > RULES.minRoas) {
+      if (elapP >= RULES.pauseAlertMin * 60000 && r.roas > RULES.minRoas) {
         reactList.push({ id: c.id, name: c.name, mins: Math.round(elapP / 60000), roas: +r.roas.toFixed(2) });
       }
     }
@@ -641,17 +642,21 @@ async function run(env) {
     try { await env.RULES_KV.put('pausedAt', JSON.stringify(cleanPa)); } catch (e) {}
   }
 
-  /* ── TELEGRAM: campanhas que PAUSARAM (live) ou que PAUSARIAM (dry). 1x/dia por campanha (anti-spam). ── */
+  /* ── TELEGRAM: avisos das campanhas. Anti-spam por TIMESTAMP: repete o MESMO aviso a cada
+     alertRepeatMin(10) min enquanto o estado durar (antes era 1x/dia). ── */
   if (env.TG_TOKEN && env.TG_CHAT) {
     try {
-      var sent = {}; try { var ss = await env.RULES_KV.get('tgSent'); if (ss) sent = JSON.parse(ss); } catch (e) {}
-      var newSent = {}; Object.keys(sent).forEach(function (k) { if (sent[k] === today) newSent[k] = today; }); /* poda: so mantem hoje */
+      var repMs = (RULES.alertRepeatMin || 10) * 60000, nowT = Date.now();
+      /* tgSent = { chave: timestamp do ultimo envio }. Poda: descarta chaves com > 26h. */
+      var sent = {}; try { var ss = await env.RULES_KV.get('tgSent'); if (ss) { var sj = JSON.parse(ss); if (sj && typeof sj === 'object') sent = sj; } } catch (e) {}
+      var newSent = {}; Object.keys(sent).forEach(function (k) { if (typeof sent[k] === 'number' && (nowT - sent[k]) < 26 * 3600000) newSent[k] = sent[k]; });
+      var canSend = function (k) { return !newSent[k] || (nowT - newSent[k]) >= repMs; };
       var liveMode = (env.APPLY_MODE || 'dry') === 'live';
       var lines = [];
       for (var pi = 0; pi < pausedList.length; pi++) {
         var pp = pausedList[pi];
         var pk = pp.id + ':pause';
-        if (newSent[pk] !== today) { lines.push('• ' + pp.name + '\n   ' + pp.action); newSent[pk] = today; }
+        if (canSend(pk)) { lines.push('• ' + pp.name + '\n   ' + pp.action); newSent[pk] = nowT; }
       }
       if (lines.length) {
         var show = lines.slice(0, 25);
@@ -659,12 +664,12 @@ async function run(env) {
         var head = liveMode ? '\u{1F6D1} Robô PAUSOU ' : '⚠️ Robô PAUSARIA (dry, não pausou) ';
         await sendTelegram(env, head + lines.length + ' campanha(s):\n\n' + show.join('\n\n'));
       }
-      /* LIMITE DE GASTO (soft-stop sem venda), 1x/dia por campanha. */
+      /* LIMITE DE GASTO (soft-stop sem venda). */
       var linesL = [];
       for (var li = 0; li < limitedList.length; li++) {
         var ll = limitedList[li];
         var lk = ll.id + ':limit';
-        if (newSent[lk] !== today) { linesL.push('• ' + ll.name + '\n   ' + ll.action); newSent[lk] = today; }
+        if (canSend(lk)) { linesL.push('• ' + ll.name + '\n   ' + ll.action); newSent[lk] = nowT; }
       }
       if (linesL.length) {
         var showL = linesL.slice(0, 25);
@@ -672,12 +677,12 @@ async function run(env) {
         var headL = liveMode ? '\u{1F6A7} Robô LIMITOU o gasto de ' : '⚠️ Robô LIMITARIA o gasto (dry) de ';
         await sendTelegram(env, headL + linesL.length + ' campanha(s):\n\n' + showL.join('\n\n'));
       }
-      /* LIMITE REMOVIDO pelo robo (recuperou ROAS>1,5 na janela 3h-23h), 1x/dia por campanha. */
+      /* LIMITE REMOVIDO pelo robo (recuperou ROAS>1,5 na janela). */
       var linesU = [];
       for (var ui = 0; ui < unlimitedList.length; ui++) {
         var uu = unlimitedList[ui];
         var uk = uu.id + ':unlim';
-        if (newSent[uk] !== today) { linesU.push('• ' + uu.name + '\n   recuperou · ROAS ' + uu.roas.toFixed(2) + ' — limite REMOVIDO, voltou a rodar'); newSent[uk] = today; }
+        if (canSend(uk)) { linesU.push('• ' + uu.name + '\n   recuperou · ROAS ' + uu.roas.toFixed(2) + ' — limite REMOVIDO, voltou a rodar'); newSent[uk] = nowT; }
       }
       if (linesU.length) {
         var showU = linesU.slice(0, 25);
@@ -685,12 +690,12 @@ async function run(env) {
         var headU = liveMode ? '\u{2705} Robô REMOVEU o limite de ' : '⚠️ Robô REMOVERIA o limite (dry) de ';
         await sendTelegram(env, headU + linesU.length + ' campanha(s) que recuperou (ROAS>' + RULES.remLimRoas + '):\n\n' + showU.join('\n\n'));
       }
-      /* REATIVAR: pausadas ha ~pauseAlertMin min (ROAS>1,3). Avisa 1x por pausa (chave por dia). */
+      /* REATIVAR: pausadas ha >= pauseAlertMin min (ROAS>1,3), repete a cada alertRepeatMin ate reativar. */
       var linesR = [];
       for (var ri = 0; ri < reactList.length; ri++) {
         var rr = reactList[ri];
         var rk = rr.id + ':react';
-        if (newSent[rk] !== today) { linesR.push('• ' + rr.name + '\n   pausada ha ~' + rr.mins + ' min · ROAS ' + rr.roas.toFixed(2) + ' — REATIVE antes de 1h'); newSent[rk] = today; }
+        if (canSend(rk)) { linesR.push('• ' + rr.name + '\n   pausada ha ~' + rr.mins + ' min · ROAS ' + rr.roas.toFixed(2) + ' — REATIVE antes de 1h'); newSent[rk] = nowT; }
       }
       if (linesR.length) {
         var showR = linesR.slice(0, 25);
