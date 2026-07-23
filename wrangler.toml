@@ -48,6 +48,8 @@ R_ACCGOOD = "1.35"       # piso em dia BOM com >2 vendas
 R_ACCGOODMINSALES = "2"  # regra do piso BOM = sales > este valor (ou seja, >2 vendas)
 R_AUMMAXSALES = "5"    # campanhas com MAIS de 5 vendas: so CORTA se ROAS < R_MINROAS; >=R_EXCROAS escala; no meio MANTEM (nunca LIMITA/AUMENTA)
 R_CUTNOSALE = "100"    # gastou >= isso e 0 venda -> PAUSA (e alerta Telegram)
+R_NOSALEHOUR = "23"    # SEM venda hoje: ao chegar esta hora BR, baixa o diario p/ R_NOSALEDAILY (via termino)
+R_NOSALEDAILY = "100"  # diario alvo p/ campanha sem venda apos as 23h (so reduz, nunca aumenta)
 R_PAUSEROAS = "1.5"    # <=5 vendas: ROAS abaixo disso -> PAUSA. Tbm o limite de REATIVAR (acima disso)
 R_ESCROAS = "1.7"      # aumenta so acima disso (com excMinSales+ vendas)
 R_ESCPCT = "0.20"      # aumento = +20% do diario atual

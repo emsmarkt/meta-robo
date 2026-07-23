@@ -20,6 +20,8 @@ var RULES = {
      >2 vendas E dia BOM -> accGood(1.35); >2 vendas dia nao-bom -> accBase(1.5). */
   accBase: 1.5, accGood: 1.35, accGoodMinSales: 2,
   cutNoSaleSpend: 100,
+  /* SEM venda hoje: ao chegar noSaleHourBR(23h) BR, baixa o DIARIO p/ noSaleDaily($100) via termino (so se estiver acima). */
+  noSaleHourBR: 23, noSaleDaily: 100,
   /* SEM venda: gasto >= limSpendTrigger($90) -> LIMITAR, trava ~$120 o DIA INTEIRO (sem horario).
      A Meta forca travar em ~1,33x o gasto, entao 90 x 1,33 ~= 120 (teto real). */
   limSpendTrigger: 90, limSpendCap: 120,
@@ -47,6 +49,7 @@ function buildRules(env) {
     minRoas: n('R_MINROAS', 1.3),
     accBase: n('R_ACCBASE', 1.5), accGood: n('R_ACCGOOD', 1.35), accGoodMinSales: n('R_ACCGOODMINSALES', 2),
     cutNoSaleSpend: n('R_CUTNOSALE', 100),
+    noSaleHourBR: n('R_NOSALEHOUR', 23), noSaleDaily: n('R_NOSALEDAILY', 100),
     pauseRoas: n('R_PAUSEROAS', 1.5), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
     limSpendTrigger: n('R_LIMTRIG', 90), limSpendCap: n('R_LIMCAP', 120),
     limRoas: n('R_LIMROAS', 1.4), limMinSpend: n('R_LIMMINSPEND', 1),
@@ -190,9 +193,13 @@ function suggestRule(c, mood) {
     var _cmp = sales >= RULES.aumMaxSales ? ' campea s/ aumento ha ' + (_incDays >= 9999 ? 'nunca' : _incDays + 'd') + ',' : '';
     return { action: 'AUMENTAR diario p/ $' + Math.round(targetA) + ' (' + RULES.aumMult + 'x —' + _cmp + ' ROAS hoje ' + roas.toFixed(2) + ', 7d ' + (c._roas7d || 0).toFixed(2) + ', apos ' + RULES.aumHourBR + 'h)', key: 'AUMENTAR', target: targetA, newEnd: newEndA, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   }
-  /* SEM VENDA: gastou >= cutNoSaleSpend($100) -> CORTAR (+cutDays, reduz o ritmo). Senao COLETANDO. */
+  /* SEM VENDA hoje: ao chegar noSaleHourBR(23h) BR, baixa o DIARIO p/ noSaleDaily($100) via termino
+     (so se o ritmo atual estiver ACIMA de $100 — nunca aumenta). Antes das 23h: COLETANDO (da o dia p/ vender). */
   if (sales === 0) {
-    if (sp >= RULES.cutNoSaleSpend) return { action: 'REDUZIR RITMO (+' + RULES.cutDays + 'd — $' + Math.round(sp) + ' hoje s/ venda)', key: 'CORTAR', target: cortarTarget, newEnd: cortarEnd, cpa: null, roas: 0, sales: 0, spend: sp };
+    if (brHour() >= RULES.noSaleHourBR && curDaily > RULES.noSaleDaily) {
+      var neNS = rem > 0 ? brDatePlus(Math.max(1, Math.ceil(rem / RULES.noSaleDaily))) : cortarEnd;
+      return { action: 'DIARIO p/ $' + RULES.noSaleDaily + ' (sem venda hoje, apos ' + RULES.noSaleHourBR + 'h)', key: 'CORTAR', target: RULES.noSaleDaily, newEnd: neNS, cpa: null, roas: 0, sales: 0, spend: sp };
+    }
     return { action: 'COLETANDO', key: 'COLETANDO', target: null, newEnd: null, cpa: Infinity, roas: 0, sales: 0, spend: sp };
   }
   /* COM VENDA e menos de aumMaxSales(5) vendas: ROAS < limRoas(1,4) -> CORTAR (+cutDays, reduz ritmo);
