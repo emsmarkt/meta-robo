@@ -19,8 +19,9 @@ var RULES = {
   /* PISO de ROAS p/ "ganhar" (so no ramo de ATE 5 vendas): <=2 vendas -> accBase(1.5);
      >2 vendas E dia BOM -> accGood(1.35); >2 vendas dia nao-bom -> accBase(1.5). */
   accBase: 1.5, accGood: 1.35, accGoodMinSales: 2,
-  cutNoSaleSpend: 100,
-  /* SEM venda hoje: ao chegar noSaleHourBR(23h) BR, baixa o DIARIO p/ noSaleDaily($100) via termino (so se estiver acima). */
+  /* SEM venda: gastou >= isso -> CORTA JA (+cutDays 364d), a QUALQUER hora (nao espera as 23h). */
+  cutNoSaleSpend: 120,
+  /* SEM venda e AINDA nao bateu os $120: ao chegar noSaleHourBR(23h) BR, baixa o DIARIO p/ noSaleDaily($100) via termino (so se estiver acima). */
   noSaleHourBR: 23, noSaleDaily: 100,
   /* SEM venda: gasto >= limSpendTrigger($90) -> LIMITAR, trava ~$120 o DIA INTEIRO (sem horario).
      A Meta forca travar em ~1,33x o gasto, entao 90 x 1,33 ~= 120 (teto real). */
@@ -48,7 +49,7 @@ function buildRules(env) {
     cpaTarget: n('R_CPATARGET', 175), cpaRopeGood: n('R_CPAROPE', 190),
     minRoas: n('R_MINROAS', 1.3),
     accBase: n('R_ACCBASE', 1.5), accGood: n('R_ACCGOOD', 1.35), accGoodMinSales: n('R_ACCGOODMINSALES', 2),
-    cutNoSaleSpend: n('R_CUTNOSALE', 100),
+    cutNoSaleSpend: n('R_CUTNOSALE', 120),
     noSaleHourBR: n('R_NOSALEHOUR', 23), noSaleDaily: n('R_NOSALEDAILY', 100),
     pauseRoas: n('R_PAUSEROAS', 1.5), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
     limSpendTrigger: n('R_LIMTRIG', 90), limSpendCap: n('R_LIMCAP', 120),
@@ -193,9 +194,12 @@ function suggestRule(c, mood) {
     var _cmp = sales >= RULES.aumMaxSales ? ' campea s/ aumento ha ' + (_incDays >= 9999 ? 'nunca' : _incDays + 'd') + ',' : '';
     return { action: 'AUMENTAR diario p/ $' + Math.round(targetA) + ' (' + RULES.aumMult + 'x —' + _cmp + ' ROAS hoje ' + roas.toFixed(2) + ', 7d ' + (c._roas7d || 0).toFixed(2) + ', apos ' + RULES.aumHourBR + 'h)', key: 'AUMENTAR', target: targetA, newEnd: newEndA, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   }
-  /* SEM VENDA hoje: ao chegar noSaleHourBR(23h) BR, baixa o DIARIO p/ noSaleDaily($100) via termino
-     (so se o ritmo atual estiver ACIMA de $100 — nunca aumenta). Antes das 23h: COLETANDO (da o dia p/ vender). */
+  /* SEM VENDA hoje, na ordem:
+     1) gastou >= cutNoSaleSpend($120) -> CORTA JA (+cutDays 364d), a QUALQUER hora (nao espera as 23h);
+     2) senao, ao chegar noSaleHourBR(23h) BR -> baixa o DIARIO p/ noSaleDaily($100) (so se o ritmo estiver acima);
+     3) senao COLETANDO (ainda dando o dia p/ vender). */
   if (sales === 0) {
+    if (sp >= RULES.cutNoSaleSpend) return { action: 'CORTAR (+' + RULES.cutDays + 'd — $' + Math.round(sp) + ' hoje SEM venda)', key: 'CORTAR', target: cortarTarget, newEnd: cortarEnd, cpa: null, roas: 0, sales: 0, spend: sp };
     if (brHour() >= RULES.noSaleHourBR && curDaily > RULES.noSaleDaily) {
       var neNS = rem > 0 ? brDatePlus(Math.max(1, Math.ceil(rem / RULES.noSaleDaily))) : cortarEnd;
       return { action: 'DIARIO p/ $' + RULES.noSaleDaily + ' (sem venda hoje, apos ' + RULES.noSaleHourBR + 'h)', key: 'CORTAR', target: RULES.noSaleDaily, newEnd: neNS, cpa: null, roas: 0, sales: 0, spend: sp };
@@ -344,7 +348,7 @@ async function collect(env) {
       } catch (e) {}
     }
   }
-  var accounts = Object.values(map).filter(function (acc) { var an = (acc.name || '').toLowerCase(); return an.indexOf('effective 01') < 0 && an.indexOf('origin') < 0; });
+  var accounts = Object.values(map).filter(function (acc) { var an = (acc.name || '').toLowerCase(); return an.indexOf('effective 01') < 0 && an.indexOf('origin') < 0 && an.indexOf('hhh hhh') < 0; });
   var camps = [];
   // Lista campanhas de TODAS as contas em LOTE por token (Meta Batch API) — poucos subrequests.
   var rel = 'campaigns?fields=name,status,effective_status,lifetime_budget,stop_time&effective_status=' + encodeURIComponent('["ACTIVE","PAUSED","IN_PROCESS","WITH_ISSUES"]') + '&limit=100';
@@ -392,7 +396,7 @@ async function collect(env) {
   // Cambio USD/BRL AO VIVO (AwesomeAPI); fallback R_FX. Converte o custo do RedTrack (R$) em US$.
   var fx = await liveFx(env);
   // vendas de hoje (RedTrack, por sub3 = campaign_id)
-  DIAG = { rtTokenSet: !!env.RT_TOKEN, metaTokens: JSON.parse(env.META_TOKENS || '[]').length, today: brDatePlus(0), fx: fx, camps: camps.length };
+  DIAG = { rtTokenSet: !!env.RT_TOKEN, metaTokens: JSON.parse(env.META_TOKENS || '[]').length, tg: !!(env.TG_TOKEN && env.TG_CHAT), today: brDatePlus(0), fx: fx, camps: camps.length };
   if (env.RT_TOKEN) {
     var pType = env.RT_PTYPE || '1';
     var url = RT_API + '/report?api_key=' + encodeURIComponent(env.RT_TOKEN) + '&group=sub3&date_from=' + brDatePlus(0) + '&date_to=' + brDatePlus(0) + '&per=1000';
@@ -591,6 +595,8 @@ async function run(env) {
     var c = camps[i];
     var r = suggestRule(c, moodObj.mood);
     actions.push({ name: c.name, id: c.id, action: r.action, target: r.target, newEnd: r.newEnd, sales: r.sales, spend: Math.round(r.spend), cpa: isFinite(r.cpa) ? Math.round(r.cpa) : null, roas: +r.roas.toFixed(2) });
+    /* DRY: avisa o que CORTARIA. Em LIVE a lista so recebe quando aplica de verdade (evita repetir todo ciclo). */
+    if (r.key === 'CORTAR' && (env.APPLY_MODE || 'dry') !== 'live') cortadaList.push({ id: c.id, name: c.name, action: r.action });
 
     /* ── PAUSAR: status PAUSED. Registra em pausedList (dry E live, p/ Telegram). So pausa de verdade em live e se ativa. ── */
     if (r.key === 'PAUSAR') {
@@ -733,7 +739,8 @@ async function run(env) {
       if (linesC.length) {
         var showC = linesC.slice(0, 25);
         if (linesC.length > 25) showC.push('…e mais ' + (linesC.length - 25) + ' campanha(s).');
-        await sendTelegram(env, '\u{2702}\u{FE0F} Robô REDUZIU o ritmo (término +' + RULES.cutDays + 'd) de ' + linesC.length + ' campanha(s):\n\n' + showC.join('\n\n'));
+        var headC = liveMode ? '\u{2702}\u{FE0F} Robô REDUZIU o ritmo de ' : '⚠️ Robô REDUZIRIA o ritmo (dry, não aplicou) de ';
+        await sendTelegram(env, headC + linesC.length + ' campanha(s):\n\n' + showC.join('\n\n'));
       }
       /* LIMITE REMOVIDO pelo robo (recuperou ROAS>1,5 na janela). */
       var linesU = [];
