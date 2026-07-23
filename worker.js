@@ -435,8 +435,13 @@ async function collect(env) {
       var pType7 = env.RT_PTYPE || '1';
       var url7 = RT_API + '/report?api_key=' + encodeURIComponent(env.RT_TOKEN) + '&group=sub3&date_from=' + brDatePlus(-6) + '&date_to=' + brDatePlus(0) + '&per=1000';
       var resp7 = await fetch(url7, { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0 (compatible; CBORobo/1.0)' } });
-      var d7 = await resp7.json();
-      var rows7 = d7.items || d7.data || d7.report || (Array.isArray(d7) ? d7 : []);
+      DIAG.rt7dHttp = resp7.status;
+      DIAG.rt7dRange = brDatePlus(-6) + '..' + brDatePlus(0);
+      var txt7 = await resp7.text();
+      var d7 = null;
+      try { d7 = JSON.parse(txt7); } catch (e2) { DIAG.rt7dParseErr = String((e2 && e2.message) || e2); }
+      var rows7 = (d7 && (d7.items || d7.data || d7.report)) || (Array.isArray(d7) ? d7 : []);
+      if (!(Array.isArray(rows7) && rows7.length)) DIAG.rt7dRaw = String(txt7).slice(0, 200); /* mostra o que a API devolveu */
       var by7 = {};
       (Array.isArray(rows7) ? rows7 : []).forEach(function (row) {
         if (row.sub3 == null) return;
