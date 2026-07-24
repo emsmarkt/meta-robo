@@ -650,12 +650,19 @@ async function run(env) {
     var c = camps[i];
     var r = suggestRule(c, moodObj.mood);
     actions.push({ name: c.name, id: c.id, action: r.action, target: r.target, newEnd: r.newEnd, sales: r.sales, spend: Math.round(r.spend), cpa: isFinite(r.cpa) ? Math.round(r.cpa) : null, roas: +r.roas.toFixed(2) });
+    /* JA APLICADA HOJE? Olha o mapa COMPARTILHADO `applied` — que recebe tanto as aplicacoes do robo
+       quanto as MANUAIS do dashboard (POST /applied). Se a regra ja foi aplicada, NAO avisa de novo:
+       o alerta e so p/ regra PENDENTE. (A condicao de CORTAR — 0 venda + gasto — continua verdadeira
+       depois de aplicar, entao sem esta guarda o Telegram repetia a cada ciclo, p/ sempre.) */
+    var _prevAp = appliedMap[c.id];
+    var _jaAplicada = !!(_prevAp && _prevAp.day === today && _prevAp.sig === r.key);
+
     /* DRY: avisa o que CORTARIA. Em LIVE a lista so recebe quando aplica de verdade (evita repetir todo ciclo). */
-    if (r.key === 'CORTAR' && (env.APPLY_MODE || 'dry') !== 'live') cortadaList.push({ id: c.id, name: c.name, action: r.action });
+    if (r.key === 'CORTAR' && (env.APPLY_MODE || 'dry') !== 'live' && !_jaAplicada) cortadaList.push({ id: c.id, name: c.name, action: r.action });
 
     /* ── PAUSAR: status PAUSED. Registra em pausedList (dry E live, p/ Telegram). So pausa de verdade em live e se ativa. ── */
     if (r.key === 'PAUSAR') {
-      pausedList.push({ id: c.id, name: c.name, action: r.action });
+      if (!_jaAplicada) pausedList.push({ id: c.id, name: c.name, action: r.action });
       if ((env.APPLY_MODE || 'dry') === 'live' && (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') {
         try {
           await withTokenFallback(tokens, c._tk, function (tk) { return postForm(c.id, tk, { status: 'PAUSED' }); });
@@ -667,7 +674,7 @@ async function run(env) {
       }
     } else if (r.key === 'REMLIMITE_AUTO') {
       /* ── RECUPEROU (ROAS>remLimRoas, janela remLimStart..remLimEnd): robo REMOVE o limite sozinho. ── */
-      unlimitedList.push({ id: c.id, name: c.name, roas: +r.roas.toFixed(2) });
+      if (!_jaAplicada) unlimitedList.push({ id: c.id, name: c.name, roas: +r.roas.toFixed(2) });
       if ((env.APPLY_MODE || 'dry') === 'live' && (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') {
         try {
           await removeCapsForNewDay([c]); /* seta cap = orcamento da campanha (= sem limite) e marca _hasCap=false */
