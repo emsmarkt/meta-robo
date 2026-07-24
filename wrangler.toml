@@ -48,6 +48,15 @@ R_ACCGOOD = "1.35"       # piso em dia BOM com >2 vendas
 R_ACCGOODMINSALES = "2"  # regra do piso BOM = sales > este valor (ou seja, >2 vendas)
 R_AUMMAXSALES = "5"    # campanhas com MAIS de 5 vendas: so CORTA se ROAS < R_MINROAS; >=R_EXCROAS escala; no meio MANTEM (nunca LIMITA/AUMENTA)
 R_CUTNOSALE = "120"    # SEM venda: gastou >= isso -> CORTA (+364d), a QUALQUER hora, 24h/dia
+# RESET DA MANHA: as R_MORNHOUR h BR, campanha de orcamento TOTAL com gasto de hoje < R_MORNMAXSPEND
+# E diario atual < R_MORNMAXDAILY -> sobe o diario p/ R_MORNDAILY (via termino). 1x por dia.
+R_MORNHOUR = "9"       # hora BR do reset
+R_MORNMAXSPEND = "120" # so se o gasto de HOJE estiver abaixo disso
+R_MORNMAXDAILY = "100" # so se o ritmo diario atual estiver abaixo disso
+R_MORNDAILY = "120"    # diario alvo do reset
+# RESTAURAR: se a ULTIMA mudanca de termino foi um CORTAR e o ROAS voltou acima disso,
+# devolve o diario que a campanha tinha ANTES do corte (dailyOld do historico).
+R_RESTOREROAS = "1.4"
 R_PAUSEROAS = "1.5"    # <=5 vendas: ROAS abaixo disso -> PAUSA. Tbm o limite de REATIVAR (acima disso)
 R_ESCROAS = "1.7"      # aumenta so acima disso (com excMinSales+ vendas)
 R_ESCPCT = "0.20"      # aumento = +20% do diario atual
@@ -68,6 +77,7 @@ R_AUMHOURBR = "20"     # so aparece depois dessa hora BR
 R_AUMROAS7D = "1.4"    # exige ROAS dos ultimos 7 dias acima disso
 R_AUMMULT = "1.5"      # sugere diario = 1,5x o atual
 R_AUMCAMPEADIAS = "3"  # campea (>=5 vendas): so sugere AUMENTAR se nao houve aumento nos ult. X dias
+R_ROAS7DTTL = "60"     # minutos de CACHE (KV) do ROAS 7 dias — evita o 429 do RedTrack
 R_SCALEUSEPCT = "0.2"  # so escala se gasto hoje >= isso do diario atual
 R_RELEASE = "500"      # campanha que vende mas esta limitada -> libera p/ esse valor
 R_ALERT3DROAS = "1.0"  # aviso "matar": ROAS dos 3 dias < isso
