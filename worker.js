@@ -589,6 +589,11 @@ async function run(env) {
   try { var s = await env.RULES_KV.get('enabled'); if (s === 'off') enabled = false; } catch (e) {}
   if (!enabled) return { skipped: 'desligado pela chave-mestra (KV enabled=off)' };
 
+  /* APPLY_MODE efetivo: a chave KV `applyMode` (controlada pelo interruptor do dashboard) VENCE o env/wrangler.
+     Assim o modo sobrevive a deploy (o toml nao reverte mais) e o usuario liga/desliga o "live" pela tela. */
+  var applyMode = env.APPLY_MODE === 'live' ? 'live' : 'dry';
+  try { var am2 = await env.RULES_KV.get('applyMode'); if (am2 === 'live' || am2 === 'dry') applyMode = am2; } catch (e) {}
+
   var tokens = JSON.parse(env.META_TOKENS || '[]');
   var camps = await collect(env);
   var moodObj = computeMood(camps);
@@ -629,8 +634,8 @@ async function run(env) {
   var capReset = null; try { capReset = await env.RULES_KV.get('capResetDay'); } catch (e) {}
   if (capReset !== today) {
     var toClear = camps.filter(function (c) { return c._hasCap; });
-    DIAG.capReset = { day: today, limitadas: toClear.length, mode: env.APPLY_MODE || 'dry' };
-    if ((env.APPLY_MODE || 'dry') === 'live') {
+    DIAG.capReset = { day: today, limitadas: toClear.length, mode: applyMode };
+    if ((applyMode) === 'live') {
       if (toClear.length) { DIAG.capReset.conjuntosLiberados = await removeCapsForNewDay(toClear); }
       try { await env.RULES_KV.put('capResetDay', today); } catch (e) {}
     }
@@ -658,12 +663,12 @@ async function run(env) {
     var _jaAplicada = !!(_prevAp && _prevAp.day === today && _prevAp.sig === r.key);
 
     /* DRY: avisa o que CORTARIA. Em LIVE a lista so recebe quando aplica de verdade (evita repetir todo ciclo). */
-    if (r.key === 'CORTAR' && (env.APPLY_MODE || 'dry') !== 'live' && !_jaAplicada) cortadaList.push({ id: c.id, name: c.name, action: r.action });
+    if (r.key === 'CORTAR' && (applyMode) !== 'live' && !_jaAplicada) cortadaList.push({ id: c.id, name: c.name, action: r.action });
 
     /* ── PAUSAR: status PAUSED. Registra em pausedList (dry E live, p/ Telegram). So pausa de verdade em live e se ativa. ── */
     if (r.key === 'PAUSAR') {
       if (!_jaAplicada) pausedList.push({ id: c.id, name: c.name, action: r.action });
-      if ((env.APPLY_MODE || 'dry') === 'live' && (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') {
+      if ((applyMode) === 'live' && (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') {
         try {
           await withTokenFallback(tokens, c._tk, function (tk) { return postForm(c.id, tk, { status: 'PAUSED' }); });
           pausedAt[c.id] = Date.now(); pausedAtDirty = true; /* base do aviso "reative antes de 1h" */
@@ -675,7 +680,7 @@ async function run(env) {
     } else if (r.key === 'REMLIMITE_AUTO') {
       /* ── RECUPEROU (ROAS>remLimRoas, janela remLimStart..remLimEnd): robo REMOVE o limite sozinho. ── */
       if (!_jaAplicada) unlimitedList.push({ id: c.id, name: c.name, roas: +r.roas.toFixed(2) });
-      if ((env.APPLY_MODE || 'dry') === 'live' && (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') {
+      if ((applyMode) === 'live' && (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') {
         try {
           await removeCapsForNewDay([c]); /* seta cap = orcamento da campanha (= sem limite) e marca _hasCap=false */
           appliedMap[c.id] = { sig: 'REMLIMITE_AUTO', action: r.action, t: Date.now(), day: today };
@@ -689,7 +694,7 @@ async function run(env) {
       /* ── LIMITAR GASTO (soft-stop): aplica lifetime_spend_cap nos conjuntos (live, campanha ativa,
          respeitando cooldown). NAO pausa. REMLIMITE fica de fora (remocao SO manual / virada). ── */
       limitedList.push({ id: c.id, name: c.name, action: r.action });
-      if ((env.APPLY_MODE || 'dry') === 'live' && (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') {
+      if ((applyMode) === 'live' && (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') {
         var prevL = appliedMap[c.id];
         var sameL = prevL && prevL.day === today && prevL.sig === r.key; /* nao repete a MESMA acao no mesmo dia */
         var ckL = 'cd:' + c.id, lastL = 0;
@@ -707,7 +712,7 @@ async function run(env) {
           }
         }
       }
-    } else if ((env.APPLY_MODE || 'dry') === 'live' && r.newEnd && r.key && r.key !== 'AUMENTAR') {
+    } else if ((applyMode) === 'live' && r.newEnd && r.key && r.key !== 'AUMENTAR') {
       /* AUMENTAR fica de FORA do auto-apply (usuario faz manual pelo dashboard). O robo so sugere. */
       var prev = appliedMap[c.id];
       var sameAsLast = prev && prev.day === today && prev.sig === r.key; // a ULTIMA aplicada hoje ja foi essa mesma regra -> nao repete (mas reaplica se mudou e voltou)
@@ -767,7 +772,7 @@ async function run(env) {
       var sent = {}; try { var ss = await env.RULES_KV.get('tgSent'); if (ss) { var sj = JSON.parse(ss); if (sj && typeof sj === 'object') sent = sj; } } catch (e) {}
       var newSent = {}; Object.keys(sent).forEach(function (k) { if (typeof sent[k] === 'number' && (nowT - sent[k]) < 26 * 3600000) newSent[k] = sent[k]; });
       var canSend = function (k) { return !newSent[k] || (nowT - newSent[k]) >= repMs; };
-      var liveMode = (env.APPLY_MODE || 'dry') === 'live';
+      var liveMode = (applyMode) === 'live';
       var lines = [];
       for (var pi = 0; pi < pausedList.length; pi++) {
         var pp = pausedList[pi];
@@ -878,7 +883,7 @@ async function run(env) {
   }
   DIAG.blocked = BLOCKED.length; /* visivel no /run */
 
-  var log = { at: new Date().toISOString(), mode: env.APPLY_MODE || 'dry', mood: moodObj.mood, moodRoas: +moodObj.roas.toFixed(2), count: camps.length, diag: DIAG, actions: actions };
+  var log = { at: new Date().toISOString(), mode: applyMode, mood: moodObj.mood, moodRoas: +moodObj.roas.toFixed(2), count: camps.length, diag: DIAG, actions: actions };
   try { await env.RULES_KV.put('lastRun', JSON.stringify(log)); } catch (e) {}
   return log;
 }
@@ -891,6 +896,20 @@ export default {
   async fetch(request, env) {
     var path = new URL(request.url).pathname;
     if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
+
+    /* INTERRUPTOR LIVE/DRY do robo (KV `applyMode`). O dashboard le (GET) e liga/desliga (POST {mode}).
+       Esta chave VENCE o env/wrangler no run(), entao sobrevive a deploy. GET tambem devolve o default do env. */
+    if (path === '/applymode') {
+      if (request.method === 'POST') {
+        var mb = {}; try { mb = await request.json(); } catch (e) {}
+        var mode = (mb && mb.mode === 'live') ? 'live' : 'dry';
+        try { await env.RULES_KV.put('applyMode', mode); } catch (e) {}
+        return jsonResp({ ok: true, mode: mode });
+      }
+      var cur = null; try { cur = await env.RULES_KV.get('applyMode'); } catch (e) {}
+      var eff = (cur === 'live' || cur === 'dry') ? cur : (env.APPLY_MODE === 'live' ? 'live' : 'dry');
+      return jsonResp({ mode: eff, kv: cur, envDefault: env.APPLY_MODE || 'dry' });
+    }
 
     /* Estado COMPARTILHADO das regras aplicadas (todo mundo ve igual). Guardado no KV. */
     if (path === '/applied') {
