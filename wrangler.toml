@@ -50,9 +50,14 @@ R_ACCGOOD = "1.35"       # piso em dia BOM com >2 vendas
 R_ACCGOODMINSALES = "2"  # regra do piso BOM = sales > este valor (ou seja, >2 vendas)
 R_AUMMAXSALES = "5"    # campanhas com MAIS de 5 vendas: so CORTA se ROAS < R_MINROAS; >=R_EXCROAS escala; no meio MANTEM (nunca LIMITA/AUMENTA)
 R_CUTNOSALE = "120"    # SEM venda: gastou >= isso -> CORTA (+364d), a QUALQUER hora, 24h/dia
-# RESET DA MANHA: as R_MORNHOUR h BR, campanha de orcamento TOTAL com gasto de hoje < R_MORNMAXSPEND
+# ALERTA Telegram (so aviso, sem acao) p/ CBO de orcamento DIARIO: ATIVA, gasto hoje >= R_DAILYSPEND,
+# 0 venda, CPC > R_DAILYCPC E CPI > R_DAILYCPI. 1x por dia por campanha.
+R_DAILYSPEND = "120"   # gasto de hoje minimo p/ alertar
+R_DAILYCPC = "2"       # CPC (US$) acima disso = caro
+R_DAILYCPI = "55"      # CPI/custo por InitiateCheckout (US$) acima disso = caro
+# RESET: nas horas R_MORNHOURS BR (lista separada por virgula, ex "0,9"), campanha de orcamento TOTAL com gasto de hoje < R_MORNMAXSPEND
 # E diario atual < R_MORNMAXDAILY -> sobe o diario p/ R_MORNDAILY (via termino). 1x por dia.
-R_MORNHOUR = "9"       # hora BR do reset
+R_MORNHOURS = "0,9"    # horas BR do reset (00h e 9h, todo dia) — separadas por virgula
 R_MORNMAXSPEND = "120" # so se o gasto de HOJE estiver abaixo disso
 R_MORNMAXDAILY = "100" # so se o ritmo diario atual estiver abaixo disso
 R_MORNDAILY = "120"    # diario alvo do reset
