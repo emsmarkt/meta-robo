@@ -49,10 +49,10 @@ R_ACCBASE = "1.5"        # piso padrao (<=2 vendas, ou >2 vendas em dia nao-bom)
 R_ACCGOOD = "1.35"       # piso em dia BOM com >2 vendas
 R_ACCGOODMINSALES = "2"  # regra do piso BOM = sales > este valor (ou seja, >2 vendas)
 R_AUMMAXSALES = "5"    # campanhas com MAIS de 5 vendas: so CORTA se ROAS < R_MINROAS; >=R_EXCROAS escala; no meio MANTEM (nunca LIMITA/AUMENTA)
-R_CUTNOSALE = "120"    # SEM venda: gastou >= isso -> CORTA (+364d), a QUALQUER hora, 24h/dia
+R_CUTNOSALE = "100"    # SEM venda: gastou >= isso -> CORTA (+364d), a QUALQUER hora, 24h/dia
 # ALERTA Telegram (so aviso, sem acao) p/ CBO de orcamento DIARIO: ATIVA, gasto hoje >= R_DAILYSPEND,
 # 0 venda, CPC > R_DAILYCPC E CPI > R_DAILYCPI. 1x por dia por campanha.
-R_DAILYSPEND = "120"   # gasto de hoje minimo p/ alertar
+R_DAILYSPEND = "100"   # gasto de hoje minimo p/ alertar
 R_DAILYCPC = "2"       # CPC (US$) acima disso = caro
 R_DAILYCPI = "55"      # CPI/custo por InitiateCheckout (US$) acima disso = caro
 # RESET: nas horas R_MORNHOURS BR (lista separada por virgula, ex "0,9"), campanha de orcamento TOTAL com gasto de hoje < R_MORNMAXSPEND

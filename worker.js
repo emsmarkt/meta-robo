@@ -21,14 +21,14 @@ var RULES = {
      >2 vendas E dia BOM -> accGood(1.35); >2 vendas dia nao-bom -> accBase(1.5). */
   accBase: 1.5, accGood: 1.35, accGoodMinSales: 2,
   /* SEM venda: gastou >= isso -> CORTA (+cutDays 364d), a QUALQUER hora, 24h/dia. Unica regra de sem-venda. */
-  cutNoSaleSpend: 120,
+  cutNoSaleSpend: 100,
   /* RESET (morningHours = horas BR, ex.: 00h e 9h): campanha de orcamento TOTAL com gasto de hoje < morningMaxSpend($120)
      E ritmo diario atual < morningMaxDaily($100) -> sobe o DIARIO p/ morningDaily($120) via termino. */
   morningHours: [0, 9], morningMaxSpend: 120, morningMaxDaily: 100, morningDaily: 120,
   /* RESTAURAR: ultima mudanca de termino foi CORTAR e a campanha recuperou (ROAS > isso) -> devolve o diario de antes. */
   restoreRoas: 1.4,
   /* ALERTA (so Telegram) p/ CBO de orcamento DIARIO: ATIVA, gasto>=$120, 0 venda, CPC>$2 e CPI>$55 (metricas caras). */
-  dailyAlertSpend: 120, dailyAlertCpc: 2, dailyAlertCpi: 55,
+  dailyAlertSpend: 100, dailyAlertCpc: 2, dailyAlertCpi: 55,
   /* SEM venda: gasto >= limSpendTrigger($90) -> LIMITAR, trava ~$120 o DIA INTEIRO (sem horario).
      A Meta forca travar em ~1,33x o gasto, entao 90 x 1,33 ~= 120 (teto real). */
   limSpendTrigger: 90, limSpendCap: 120,
@@ -57,11 +57,11 @@ function buildRules(env) {
     cpaTarget: n('R_CPATARGET', 175), cpaRopeGood: n('R_CPAROPE', 190),
     minRoas: n('R_MINROAS', 1.3),
     accBase: n('R_ACCBASE', 1.5), accGood: n('R_ACCGOOD', 1.35), accGoodMinSales: n('R_ACCGOODMINSALES', 2),
-    cutNoSaleSpend: n('R_CUTNOSALE', 120),
+    cutNoSaleSpend: n('R_CUTNOSALE', 100),
     morningHours: (function(){ var v = env && env.R_MORNHOURS; if (v) { var a = String(v).split(',').map(function(x){ return parseInt(x.trim()); }).filter(function(x){ return !isNaN(x) && x >= 0 && x <= 23; }); if (a.length) return a; } return [0, 9]; })(),
     morningMaxSpend: n('R_MORNMAXSPEND', 120), morningMaxDaily: n('R_MORNMAXDAILY', 100), morningDaily: n('R_MORNDAILY', 120),
     restoreRoas: n('R_RESTOREROAS', 1.4),
-    dailyAlertSpend: n('R_DAILYSPEND', 120), dailyAlertCpc: n('R_DAILYCPC', 2), dailyAlertCpi: n('R_DAILYCPI', 55),
+    dailyAlertSpend: n('R_DAILYSPEND', 100), dailyAlertCpc: n('R_DAILYCPC', 2), dailyAlertCpi: n('R_DAILYCPI', 55),
     pauseRoas: n('R_PAUSEROAS', 1.5), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
     limSpendTrigger: n('R_LIMTRIG', 90), limSpendCap: n('R_LIMCAP', 120),
     limRoas: n('R_LIMROAS', 1.4), limMinSpend: n('R_LIMMINSPEND', 1),
@@ -222,7 +222,7 @@ function suggestRule(c, mood) {
     var _cmp = sales >= RULES.aumMaxSales ? ' campea s/ aumento ha ' + (_incDays >= 9999 ? 'nunca' : _incDays + 'd') + ',' : '';
     return { action: 'AUMENTAR diario p/ $' + Math.round(targetA) + ' (' + RULES.aumMult + 'x —' + _cmp + ' ROAS hoje ' + roas.toFixed(2) + ', 7d ' + (c._roas7d || 0).toFixed(2) + ', apos ' + RULES.aumHourBR + 'h)', key: 'AUMENTAR', target: targetA, newEnd: newEndA, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   }
-  /* SEM VENDA hoje: gastou >= cutNoSaleSpend($120) -> CORTA (+cutDays 364d), a QUALQUER hora, 24h/dia.
+  /* SEM VENDA hoje: gastou >= cutNoSaleSpend($100) -> CORTA (+cutDays 364d), a QUALQUER hora, 24h/dia.
      Senao COLETANDO (ainda dando o dia p/ vender). NAO existe mais regra por horario aqui. */
   if (sales === 0) {
     if (sp >= RULES.cutNoSaleSpend) return { action: 'CORTAR (+' + RULES.cutDays + 'd — $' + Math.round(sp) + ' hoje SEM venda)', key: 'CORTAR', target: cortarTarget, newEnd: cortarEnd, cpa: null, roas: 0, sales: 0, spend: sp };
@@ -873,7 +873,7 @@ async function run(env) {
         if (linesR.length > 25) showR.push('…e mais ' + (linesR.length - 25) + ' campanha(s).');
         await sendTelegram(env, '⏰ REATIVAR ' + linesR.length + ' campanha(s) pausada(s) ha ~' + RULES.pauseAlertMin + ' min:\n\n' + showR.join('\n\n'));
       }
-      /* CBO DIARIO com metricas caras: ATIVA, gasto hoje >= dailyAlertSpend($120), 0 venda,
+      /* CBO DIARIO com metricas caras: ATIVA, gasto hoje >= dailyAlertSpend($100), 0 venda,
          CPC > dailyAlertCpc($2) E CPI > dailyAlertCpi($55). 1x por dia por campanha (chave c/ today). */
       var linesD = [];
       for (var di2 = 0; di2 < DAILY_CAMPS.length; di2++) {
