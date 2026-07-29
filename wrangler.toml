@@ -34,7 +34,7 @@ R_CUTDAYS = "364"      # CORTAR empurra o termino p/ daqui X dias (limite FB e 3
 R_COOLDOWN = "5"       # minutos entre 2 aplicacoes na MESMA campanha (5 = reage a cada ciclo do cron)
 R_PAUSECPC = "3"       # CPC (US$) acima disso...
 R_PAUSESPEND = "60"    # ...E gasto acima disso, com 0 venda E 0 IC -> LIMITAR GASTO (soft-stop)
-R_LIMROAS = "1.4"      # COM venda: ROAS <= isso -> LIMITAR GASTO, INDEPENDENTE do nº de vendas
+R_LIMROAS = "1.5"      # COM venda: ROAS < isso -> CORTAR (reduz orcamento). Subiu 1,4 -> 1,5 (24/07)
 R_LIMMINSPEND = "1"    # SO limita por ROAS se gasto > isso (evita falso ROAS 0 na virada: venda antes do gasto)
 R_REMLIMROAS = "1.5"   # robo REMOVE o limite sozinho se ROAS > isso (campanha recuperou)...
 R_REMLIMSTART = "10"   # ...so entre esta hora BR...
@@ -63,8 +63,8 @@ R_MORNMAXDAILY = "100" # so se o ritmo diario atual estiver abaixo disso
 R_MORNDAILY = "120"    # diario alvo do reset
 # RESTAURAR: se a ULTIMA mudanca de termino foi um CORTAR e o ROAS voltou acima disso,
 # devolve o diario que a campanha tinha ANTES do corte (dailyOld do historico).
-R_RESTOREROAS = "1.4"
-R_PAUSEROAS = "1.5"    # <=5 vendas: ROAS abaixo disso -> PAUSA. Tbm o limite de REATIVAR (acima disso)
+R_RESTOREROAS = "1.5"  # cortada que recuperou p/ ROAS > isso -> devolve o diario de antes. Subiu 1,4 -> 1,5 (24/07)
+R_PAUSEROAS = "1.7"    # PAUSAR (esperar rebote) enquanto ROAS < isso. Subiu 1,5 -> 1,7 (24/07). Tbm REATIVAR/AUMENTAR (>= isso)
 R_ESCROAS = "1.7"      # aumenta so acima disso (com excMinSales+ vendas)
 R_ESCPCT = "0.20"      # aumento = +20% do diario atual
 R_PAUSESALESBREAK = "3"  # ATE N vendas pausa por R_PAUSEROAS(1,5); ACIMA de N pausa por R_MINROAS(1,3)

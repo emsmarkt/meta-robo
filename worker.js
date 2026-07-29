@@ -26,16 +26,16 @@ var RULES = {
      E ritmo diario atual < morningMaxDaily($100) -> sobe o DIARIO p/ morningDaily($120) via termino. */
   morningHours: [0, 9], morningMaxSpend: 120, morningMaxDaily: 100, morningDaily: 120,
   /* RESTAURAR: ultima mudanca de termino foi CORTAR e a campanha recuperou (ROAS > isso) -> devolve o diario de antes. */
-  restoreRoas: 1.4,
+  restoreRoas: 1.5,
   /* ALERTA (so Telegram) p/ CBO de orcamento DIARIO: ATIVA, gasto>=$120, 0 venda, CPC>$2 e CPI>$55 (metricas caras). */
   dailyAlertSpend: 100, dailyAlertCpc: 2, dailyAlertCpi: 55,
   /* SEM venda: gasto >= limSpendTrigger($90) -> LIMITAR, trava ~$120 o DIA INTEIRO (sem horario).
      A Meta forca travar em ~1,33x o gasto, entao 90 x 1,33 ~= 120 (teto real). */
   limSpendTrigger: 90, limSpendCap: 120,
-  limRoas: 1.4, // COM venda: ROAS <= isso -> LIMITAR, INDEPENDENTE do nº de vendas.
+  limRoas: 1.5, // COM venda: ROAS < isso -> CORTAR (reduz orcamento). Subiu 1,4 -> 1,5 (24/07).
   limMinSpend: 1, // SO limita por ROAS se gasto > isso. Evita o falso ROAS 0 na virada (venda sincroniza antes do gasto).
   remLimRoas: 1.5, remLimStart: 10, remLimEnd: 23, // robo REMOVE o limite sozinho se ROAS > 1,5 entre remLimStart(10h) e remLimEnd(23h) BR (campanha recuperou).
-  pauseRoas: 1.5, escRoas: 1.7, escPct: 0.20, pauseSalesBreak: 3, // 1-3 vd: pausa ROAS<1,5; >3 vd: pausa ROAS<=1,3; ROAS>1,7 e 3+ vd -> +20%. Reativa: ROAS>1,5
+  pauseRoas: 1.7, escRoas: 1.7, escPct: 0.20, pauseSalesBreak: 3, // PAUSAR(esperar rebote) enquanto ROAS < 1,7. Subiu 1,5 -> 1,7 (24/07). Reativa/AUMENTA: ROAS>=1,7
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
   /* AUMENTAR (so SUGESTAO): so apos aumHourBR(20h) BR, ROAS de HOJE >= pauseRoas(1,5) E ROAS dos ult. 7 dias > aumRoas7dMin(1,4) -> subir o diario p/ aumMult(1,5)x o atual.
@@ -60,11 +60,11 @@ function buildRules(env) {
     cutNoSaleSpend: n('R_CUTNOSALE', 100),
     morningHours: (function(){ var v = env && env.R_MORNHOURS; if (v) { var a = String(v).split(',').map(function(x){ return parseInt(x.trim()); }).filter(function(x){ return !isNaN(x) && x >= 0 && x <= 23; }); if (a.length) return a; } return [0, 9]; })(),
     morningMaxSpend: n('R_MORNMAXSPEND', 120), morningMaxDaily: n('R_MORNMAXDAILY', 100), morningDaily: n('R_MORNDAILY', 120),
-    restoreRoas: n('R_RESTOREROAS', 1.4),
+    restoreRoas: n('R_RESTOREROAS', 1.5),
     dailyAlertSpend: n('R_DAILYSPEND', 100), dailyAlertCpc: n('R_DAILYCPC', 2), dailyAlertCpi: n('R_DAILYCPI', 55),
-    pauseRoas: n('R_PAUSEROAS', 1.5), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
+    pauseRoas: n('R_PAUSEROAS', 1.7), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
     limSpendTrigger: n('R_LIMTRIG', 90), limSpendCap: n('R_LIMCAP', 120),
-    limRoas: n('R_LIMROAS', 1.4), limMinSpend: n('R_LIMMINSPEND', 1),
+    limRoas: n('R_LIMROAS', 1.5), limMinSpend: n('R_LIMMINSPEND', 1),
     remLimRoas: n('R_REMLIMROAS', 1.5), remLimStart: n('R_REMLIMSTART', 10), remLimEnd: n('R_REMLIMEND', 23),
     excRoas: n('R_EXCROAS', 2.0), excMinSales: n('R_EXCMINSALES', 3), scaleMult: n('R_SCALEMULT', 12),
     aumRoasLow: n('R_AUMROASLOW', 1.5), aumRoasHigh: n('R_AUMROASHIGH', 1.9), aumPctLow: n('R_AUMPCTLOW', 0.30), aumPctHigh: n('R_AUMPCTHIGH', 0.70), aumMaxSales: n('R_AUMMAXSALES', 5),
