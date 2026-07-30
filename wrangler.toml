@@ -52,7 +52,7 @@ R_AUMMAXSALES = "5"    # campanhas com MAIS de 5 vendas: so CORTA se ROAS < R_MI
 R_CUTNOSALE = "100"    # SEM venda: gastou >= isso -> CORTA (+364d), a QUALQUER hora, 24h/dia
 # AGENDA DE ORCAMENTO (dayparting): "HH:MM=diario" separados por virgula. CBO diario muda o daily_budget;
 # CBO total muda o termino p/ o diario desejado. Notifica no Telegram. 1x por slot por dia.
-R_BUDSCHED = "23:30=100,03:00=50,11:00=500"
+R_BUDSCHED = "23:30=100,03:00=50m,10:30=500"   # sufixo "m" no valor = CBO total vai p/ +364d (nao calcula do $)
 R_SCHEDWIN = "12"      # janela (min) apos o horario p/ o cron de 5min pegar o slot
 R_CUTDAYSMAX = "364"   # teto de dias do termino (Meta rejeita >= 1 ano)
 # ALERTA Telegram (so aviso, sem acao) p/ CBO de orcamento DIARIO: ATIVA, gasto hoje >= R_DAILYSPEND,

@@ -25,7 +25,7 @@ var RULES = {
   /* AGENDA DE ORCAMENTO (dayparting): em horarios fixos BR reseta o orcamento de TODA campanha CBO ativa.
      CBO diario -> muda o daily_budget. CBO total -> muda o TERMINO p/ o diario desejado. Notifica no Telegram.
      Cron de 5 min pega o slot dentro da janela schedWindowMin. 1x por slot por dia (KV budSched). */
-  budgetSchedule: [{ h: 23, m: 30, tgt: 100 }, { h: 3, m: 0, tgt: 50, totalMax: true }, { h: 11, m: 0, tgt: 500 }],
+  budgetSchedule: [{ h: 23, m: 30, tgt: 100 }, { h: 3, m: 0, tgt: 50, totalMax: true }, { h: 10, m: 30, tgt: 500 }],
   schedWindowMin: 12, cutDaysMax: 364,
   /* RESTAURAR: ultima mudanca de termino foi CORTAR e a campanha recuperou (ROAS > isso) -> devolve o diario de antes. */
   restoreRoas: 1.5,
@@ -61,7 +61,7 @@ function buildRules(env) {
     accBase: n('R_ACCBASE', 1.5), accGood: n('R_ACCGOOD', 1.35), accGoodMinSales: n('R_ACCGOODMINSALES', 2),
     cutNoSaleSpend: n('R_CUTNOSALE', 100),
     /* AGENDA de orcamento: R_BUDSCHED = "23:30=100,03:00=50,11:00=500" (hora BR = diario alvo). */
-    budgetSchedule: (function(){ var v = env && env.R_BUDSCHED; if (v) { var a = String(v).split(',').map(function(x){ var p = x.split('='); var hm = (p[0]||'').split(':'); var h = parseInt(hm[0]), mm = parseInt(hm[1]||'0'), tgt = parseFloat(p[1]); return (!isNaN(h) && !isNaN(tgt)) ? { h: h, m: isNaN(mm)?0:mm, tgt: tgt } : null; }).filter(function(x){ return x; }); if (a.length) return a; } return [{ h: 23, m: 30, tgt: 100 }, { h: 3, m: 0, tgt: 50 }, { h: 11, m: 0, tgt: 500 }]; })(),
+    budgetSchedule: (function(){ var v = env && env.R_BUDSCHED; if (v) { var a = String(v).split(',').map(function(x){ var p = x.split('='); var hm = (p[0]||'').split(':'); var h = parseInt(hm[0]), mm = parseInt(hm[1]||'0'); var ts = (p[1]||'').trim(); var totalMax = /m$/i.test(ts); var tgt = parseFloat(ts); return (!isNaN(h) && !isNaN(tgt)) ? { h: h, m: isNaN(mm)?0:mm, tgt: tgt, totalMax: totalMax } : null; }).filter(function(x){ return x; }); if (a.length) return a; } return [{ h: 23, m: 30, tgt: 100 }, { h: 3, m: 0, tgt: 50, totalMax: true }, { h: 10, m: 30, tgt: 500 }]; })(),
     schedWindowMin: n('R_SCHEDWIN', 12), cutDaysMax: n('R_CUTDAYSMAX', 364),
     restoreRoas: n('R_RESTOREROAS', 1.5),
     dailyAlertSpend: n('R_DAILYSPEND', 100), dailyAlertCpc: n('R_DAILYCPC', 2), dailyAlertCpi: n('R_DAILYCPI', 55),
@@ -656,8 +656,10 @@ async function runBudgetSchedule(env, camps, dailyCamps, applyMode, tokens) {
         } else if (c.lifetime_budget) {
           var rem = remainingOf(c);
           if (rem > 0) {
-            var days = Math.min(RULES.cutDaysMax || 364, Math.max(1, Math.ceil(rem / due.tgt)));
-            if (days >= (RULES.cutDaysMax || 364)) note = ' (min ~$' + Math.round(rem / (RULES.cutDaysMax || 364)) + '/dia — teto de 1 ano)';
+            /* totalMax (ex.: slot 03:00): CBO total vai p/ +cutDaysMax(364)d direto (nao calcula do tgt). */
+            var days = due.totalMax ? (RULES.cutDaysMax || 364) : Math.min(RULES.cutDaysMax || 364, Math.max(1, Math.ceil(rem / due.tgt)));
+            if (!due.totalMax && days >= (RULES.cutDaysMax || 364)) note = ' (min ~$' + Math.round(rem / (RULES.cutDaysMax || 364)) + '/dia — teto de 1 ano)';
+            if (due.totalMax) note = ' (+' + days + 'd)';
             await applyChange(c, tokens, brDatePlus(days));
             okApplied = true;
           } else { note = ' (sem saldo)'; }
