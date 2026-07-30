@@ -220,9 +220,12 @@ function suggestRule(c, mood) {
     return { action: 'AUMENTAR diario p/ $' + Math.round(targetA) + ' (' + RULES.aumMult + 'x —' + _cmp + ' ROAS hoje ' + roas.toFixed(2) + ', 7d ' + (c._roas7d || 0).toFixed(2) + ', apos ' + RULES.aumHourBR + 'h)', key: 'AUMENTAR', target: targetA, newEnd: newEndA, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   }
   /* SEM VENDA hoje: gastou >= cutNoSaleSpend($100) -> CORTA (+cutDays 364d), a QUALQUER hora, 24h/dia.
-     Senao COLETANDO (ainda dando o dia p/ vender). NAO existe mais regra por horario aqui. */
+     ⚠️ SO corta se: (a) o RedTrack trouxe dados (c._rtOk) — se falhou, sales=0 e falso; (b) o Meta NAO viu
+     compra (c._metaPurch === 0) — cross-check anti-corte-errado (campanha "MÃE" nao casou no RedTrack mas vendeu).
+     Senao COLETANDO. */
   if (sales === 0) {
-    if (sp >= RULES.cutNoSaleSpend) return { action: 'CORTAR (+' + RULES.cutDays + 'd — $' + Math.round(sp) + ' hoje SEM venda)', key: 'CORTAR', target: cortarTarget, newEnd: cortarEnd, cpa: null, roas: 0, sales: 0, spend: sp };
+    var semVendaReal = c._rtOk && (c._metaPurch || 0) === 0;
+    if (sp >= RULES.cutNoSaleSpend && semVendaReal) return { action: 'CORTAR (+' + RULES.cutDays + 'd — $' + Math.round(sp) + ' hoje SEM venda)', key: 'CORTAR', target: cortarTarget, newEnd: cortarEnd, cpa: null, roas: 0, sales: 0, spend: sp };
     return { action: 'COLETANDO', key: 'COLETANDO', target: null, newEnd: null, cpa: Infinity, roas: 0, sales: 0, spend: sp };
   }
   /* COM VENDA e menos de aumMaxSales(5) vendas: ROAS < limRoas(1,4) -> CORTAR (+cutDays, reduz ritmo);
@@ -269,7 +272,7 @@ async function batchLifetimeSpend(camps, lifeRange) {
    e c._metaLinkClicks. Em LOTE (ate 50 ops/req) p/ nao estourar subrequests do Worker. */
 async function batchTodayMeta(camps) {
   var byTk = {};
-  camps.forEach(function (c) { c._metaToday = 0; c._metaLinkClicks = 0; (byTk[c._tk] = byTk[c._tk] || []).push(c); });
+  camps.forEach(function (c) { c._metaToday = 0; c._metaLinkClicks = 0; c._metaPurch = 0; (byTk[c._tk] = byTk[c._tk] || []).push(c); });
   for (var tk in byTk) {
     var list = byTk[tk];
     for (var i = 0; i < list.length; i += 50) {
@@ -277,7 +280,7 @@ async function batchTodayMeta(camps) {
       /* Fuso BR: gasto de MEIA-NOITE BR ate 23:59 BR = 1 dia. time_range c/ a data BR (a Meta usa o fuso da
          CONTA; se a conta estiver em Brasilia, bate exato). */
       var todayRange = encodeURIComponent(JSON.stringify({ since: brDatePlus(0), until: brDatePlus(0) }));
-      var batch = chunk.map(function (c) { return { method: 'GET', relative_url: c.id + '/insights?fields=spend,inline_link_clicks&time_range=' + todayRange }; });
+      var batch = chunk.map(function (c) { return { method: 'GET', relative_url: c.id + '/insights?fields=spend,inline_link_clicks,actions&time_range=' + todayRange }; });
       var body = new URLSearchParams();
       body.append('batch', JSON.stringify(batch));
       body.append('access_token', tk);
@@ -287,7 +290,14 @@ async function batchTodayMeta(camps) {
         if (Array.isArray(arr)) {
           arr.forEach(function (item, idx) {
             var c = chunk[idx];
-            try { var b = JSON.parse(item.body); var d0 = (b.data && b.data[0]) || null; c._metaToday = d0 ? (parseFloat(d0.spend) || 0) : 0; c._metaLinkClicks = d0 ? (parseInt(d0.inline_link_clicks) || 0) : 0; } catch (e) {}
+            try {
+              var b = JSON.parse(item.body); var d0 = (b.data && b.data[0]) || null;
+              c._metaToday = d0 ? (parseFloat(d0.spend) || 0) : 0;
+              c._metaLinkClicks = d0 ? (parseInt(d0.inline_link_clicks) || 0) : 0;
+              /* COMPRAS pelo Meta (cross-check anti-corte-errado): se o Meta viu compra, NAO e "sem venda". */
+              c._metaPurch = 0;
+              if (d0 && d0.actions) d0.actions.forEach(function (a) { if (/purchase/i.test(a.action_type || '')) c._metaPurch = Math.max(c._metaPurch, parseInt(a.value) || 0); });
+            } catch (e) {}
           });
         }
       } catch (e) {}
@@ -482,19 +492,22 @@ async function collect(env) {
         byIC[String(row.sub3)] = parseInt(row['convtype' + icType]) || 0;
       }
     });
-    /* RedTrack fica SO p/ VENDAS e IC. GASTO e CLIQUES (de link) vem do Meta (batchTodayMeta). */
+    /* RedTrack fica SO p/ VENDAS e IC. GASTO e CLIQUES (de link) vem do Meta (batchTodayMeta).
+       _rtOk = o RedTrack trouxe dados neste ciclo (se falhou, NAO corta ninguem como "sem venda"). */
+    var rtOk = Array.isArray(rows) && rows.length > 0;
     var applyRt = function (c) {
       c._sales = by[String(c.id)] || 0;
       c._ic = byIC[String(c.id)] || 0;
+      c._rtOk = rtOk;
       c._spendToday = c._metaToday || 0;      /* GASTO = Meta */
       c._clicks = c._metaLinkClicks || 0;     /* CLIQUES = cliques no link do Meta */
     };
     camps.forEach(applyRt);
     DAILY_CAMPS.forEach(applyRt);
   } else {
-    /* Sem RedTrack: sem vendas/IC, mas GASTO e CLIQUES do Meta seguem valendo. */
-    camps.forEach(function (c) { c._sales = 0; c._ic = 0; c._spendToday = c._metaToday || 0; c._clicks = c._metaLinkClicks || 0; });
-    DAILY_CAMPS.forEach(function (c) { c._sales = 0; c._ic = 0; c._spendToday = c._metaToday || 0; c._clicks = c._metaLinkClicks || 0; });
+    /* Sem RedTrack: sem vendas/IC (rtOk=false -> nao corta ninguem por "sem venda"), Meta segue no gasto. */
+    camps.forEach(function (c) { c._sales = 0; c._ic = 0; c._rtOk = false; c._spendToday = c._metaToday || 0; c._clicks = c._metaLinkClicks || 0; });
+    DAILY_CAMPS.forEach(function (c) { c._sales = 0; c._ic = 0; c._rtOk = false; c._spendToday = c._metaToday || 0; c._clicks = c._metaLinkClicks || 0; });
   }
   /* ROAS dos ULTIMOS 7 DIAS por campanha (RedTrack group=sub3) — so p/ a sugestao AUMENTAR (apos 20h).
      CACHE em KV por roas7dTtlMin(60) min: a janela de 7 dias muda devagar, e o RedTrack devolve 429
