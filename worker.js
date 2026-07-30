@@ -22,9 +22,11 @@ var RULES = {
   accBase: 1.5, accGood: 1.35, accGoodMinSales: 2,
   /* SEM venda: gastou >= isso -> CORTA (+cutDays 364d), a QUALQUER hora, 24h/dia. Unica regra de sem-venda. */
   cutNoSaleSpend: 100,
-  /* RESET (morningHours = horas BR, ex.: 00h e 9h): campanha de orcamento TOTAL com gasto de hoje < morningMaxSpend($120)
-     E ritmo diario atual < morningMaxDaily($100) -> sobe o DIARIO p/ morningDaily($120) via termino. */
-  morningHours: [0, 9], morningMaxSpend: 120, morningMaxDaily: 100, morningDaily: 120,
+  /* AGENDA DE ORCAMENTO (dayparting): em horarios fixos BR reseta o orcamento de TODA campanha CBO ativa.
+     CBO diario -> muda o daily_budget. CBO total -> muda o TERMINO p/ o diario desejado. Notifica no Telegram.
+     Cron de 5 min pega o slot dentro da janela schedWindowMin. 1x por slot por dia (KV budSched). */
+  budgetSchedule: [{ h: 23, m: 30, tgt: 100 }, { h: 3, m: 0, tgt: 50, totalMax: true }, { h: 11, m: 0, tgt: 500 }],
+  schedWindowMin: 12, cutDaysMax: 364,
   /* RESTAURAR: ultima mudanca de termino foi CORTAR e a campanha recuperou (ROAS > isso) -> devolve o diario de antes. */
   restoreRoas: 1.5,
   /* ALERTA (so Telegram) p/ CBO de orcamento DIARIO: ATIVA, gasto>=$120, 0 venda, CPC>$2 e CPI>$55 (metricas caras). */
@@ -58,8 +60,9 @@ function buildRules(env) {
     minRoas: n('R_MINROAS', 1.3),
     accBase: n('R_ACCBASE', 1.5), accGood: n('R_ACCGOOD', 1.35), accGoodMinSales: n('R_ACCGOODMINSALES', 2),
     cutNoSaleSpend: n('R_CUTNOSALE', 100),
-    morningHours: (function(){ var v = env && env.R_MORNHOURS; if (v) { var a = String(v).split(',').map(function(x){ return parseInt(x.trim()); }).filter(function(x){ return !isNaN(x) && x >= 0 && x <= 23; }); if (a.length) return a; } return [0, 9]; })(),
-    morningMaxSpend: n('R_MORNMAXSPEND', 120), morningMaxDaily: n('R_MORNMAXDAILY', 100), morningDaily: n('R_MORNDAILY', 120),
+    /* AGENDA de orcamento: R_BUDSCHED = "23:30=100,03:00=50,11:00=500" (hora BR = diario alvo). */
+    budgetSchedule: (function(){ var v = env && env.R_BUDSCHED; if (v) { var a = String(v).split(',').map(function(x){ var p = x.split('='); var hm = (p[0]||'').split(':'); var h = parseInt(hm[0]), mm = parseInt(hm[1]||'0'), tgt = parseFloat(p[1]); return (!isNaN(h) && !isNaN(tgt)) ? { h: h, m: isNaN(mm)?0:mm, tgt: tgt } : null; }).filter(function(x){ return x; }); if (a.length) return a; } return [{ h: 23, m: 30, tgt: 100 }, { h: 3, m: 0, tgt: 50 }, { h: 11, m: 0, tgt: 500 }]; })(),
+    schedWindowMin: n('R_SCHEDWIN', 12), cutDaysMax: n('R_CUTDAYSMAX', 364),
     restoreRoas: n('R_RESTOREROAS', 1.5),
     dailyAlertSpend: n('R_DAILYSPEND', 100), dailyAlertCpc: n('R_DAILYCPC', 2), dailyAlertCpi: n('R_DAILYCPI', 55),
     pauseRoas: n('R_PAUSEROAS', 1.7), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
@@ -80,6 +83,7 @@ function buildRules(env) {
 /* ---------- helpers de data (fuso BR fixo, UTC-3) ---------- */
 /* Hora ATUAL no fuso BR (UTC-3), 0-23. Usada p/ o teto sem-venda por horario. */
 function brHour() { return new Date(Date.now() - 3 * 3600 * 1000).getUTCHours(); }
+function brMinute() { return new Date(Date.now() - 3 * 3600 * 1000).getUTCMinutes(); }
 function brDatePlus(days) {
   var d = new Date(Date.now() - 3 * 3600 * 1000);
   d.setUTCDate(d.getUTCDate() + days);
@@ -202,14 +206,7 @@ function suggestRule(c, mood) {
     var neR = brDatePlus(Math.max(1, Math.ceil(rem / prevD)));
     return { action: 'RESTAURAR diario p/ $' + Math.round(prevD) + ' (era antes do CORTAR — ROAS ' + roas.toFixed(2) + ' > ' + RULES.restoreRoas + ')', key: 'RESTAURAR', target: prevD, newEnd: neR, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   }
-  /* RESET (morningHours = 00h e 9h BR, 1x por hora dessas pelo guard de "ja aplicada"): campanha de orcamento TOTAL
-     com gasto de HOJE < morningMaxSpend($120) E ritmo diario atual < morningMaxDaily($100)
-     -> sobe o DIARIO p/ morningDaily($120) via termino. Devolve budget a quem ficou estrangulado,
-     pra ter chance no dia; se gastar os $120 sem vender, a regra de corte pega de novo. */
-  if (RULES.morningHours.indexOf(brHour()) >= 0 && sp < RULES.morningMaxSpend && curDaily < RULES.morningMaxDaily && rem > 0) {
-    var neM = brDatePlus(Math.max(1, Math.ceil(rem / RULES.morningDaily)));
-    return { action: 'SUBIR DIARIO p/ $' + RULES.morningDaily + ' (reset ' + brHour() + 'h — gasto $' + Math.round(sp) + ', diario atual $' + Math.round(curDaily) + ')', key: 'SUBIR_DIARIO', target: RULES.morningDaily, newEnd: neM, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
-  }
+  /* (O reset de orcamento virou AGENDA por horario — ver runBudgetSchedule() no run(), fora do suggestRule.) */
   /* AUMENTAR (so SUGESTAO — robo NAO auto-aplica): DEPOIS das aumHourBR(20h) BR, ROAS de HOJE >= pauseRoas(1,5)
      E ROAS dos ult. 7 dias > aumRoas7dMin(1,4) -> sugere subir o diario p/ aumMult(1,5)x o atual.
      <aumMaxSales(5) vendas: sempre. Campea (>=5 vendas): SO se nao houve aumento nos ult. aumCampeaDays(3) dias. */
@@ -263,6 +260,37 @@ async function batchLifetimeSpend(camps, lifeRange) {
           });
         }
       } catch (e) { chunk.forEach(function (c) { c._spend = 0; }); }
+    }
+  }
+}
+
+/* GASTO de HOJE + cliques no LINK de hoje, por campanha (Meta Batch API, date_preset=today).
+   GASTO = fonte confiavel = FACEBOOK/Meta (o custo do RedTrack estava errado). Popula c._metaToday
+   e c._metaLinkClicks. Em LOTE (ate 50 ops/req) p/ nao estourar subrequests do Worker. */
+async function batchTodayMeta(camps) {
+  var byTk = {};
+  camps.forEach(function (c) { c._metaToday = 0; c._metaLinkClicks = 0; (byTk[c._tk] = byTk[c._tk] || []).push(c); });
+  for (var tk in byTk) {
+    var list = byTk[tk];
+    for (var i = 0; i < list.length; i += 50) {
+      var chunk = list.slice(i, i + 50);
+      /* Fuso BR: gasto de MEIA-NOITE BR ate 23:59 BR = 1 dia. time_range c/ a data BR (a Meta usa o fuso da
+         CONTA; se a conta estiver em Brasilia, bate exato). */
+      var todayRange = encodeURIComponent(JSON.stringify({ since: brDatePlus(0), until: brDatePlus(0) }));
+      var batch = chunk.map(function (c) { return { method: 'GET', relative_url: c.id + '/insights?fields=spend,inline_link_clicks&time_range=' + todayRange }; });
+      var body = new URLSearchParams();
+      body.append('batch', JSON.stringify(batch));
+      body.append('access_token', tk);
+      try {
+        var resp = await fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() });
+        var arr = await resp.json();
+        if (Array.isArray(arr)) {
+          arr.forEach(function (item, idx) {
+            var c = chunk[idx];
+            try { var b = JSON.parse(item.body); var d0 = (b.data && b.data[0]) || null; c._metaToday = d0 ? (parseFloat(d0.spend) || 0) : 0; c._metaLinkClicks = d0 ? (parseInt(d0.inline_link_clicks) || 0) : 0; } catch (e) {}
+          });
+        }
+      } catch (e) {}
     }
   }
 }
@@ -411,14 +439,15 @@ async function collect(env) {
   camps.forEach(function (c) { if (c._acctStatus === 1 || (c.effective_status || '').toUpperCase() === 'ACTIVE') keep[c._acctId] = true; });
   camps = camps.filter(function (c) { return keep[c._acctId]; });
 
-  // GASTO de hoje vem do RedTrack (abaixo). Aqui so o gasto VITALICIO (p/ saldo/remaining),
-  // buscado em LOTE (Meta Batch API) p/ nao estourar o limite de subrequests do Worker.
+  // GASTO de hoje = FACEBOOK/Meta (fonte confiavel). Gasto VITALICIO (saldo/remaining) tbm do Meta.
   camps.forEach(function (c) { c._spendToday = 0; c._spend = 0; });
   var sinceLife = new Date(); sinceLife.setMonth(sinceLife.getMonth() - 36);
   var lifeRange = encodeURIComponent(JSON.stringify({ since: sinceLife.toISOString().split('T')[0], until: brDatePlus(0) }));
   await batchLifetimeSpend(camps, lifeRange);
   /* Conjuntos + limite de gasto atual (p/ regra LIMITAR/REMOVER e detectar campanha ja limitada). */
   await batchAdsetCaps(camps);
+  /* GASTO de HOJE + cliques no link, direto do Meta (inclui os CBO DIARIOS, p/ o alerta de metricas caras). */
+  await batchTodayMeta(camps.concat(DAILY_CAMPS));
 
   // Cambio USD/BRL AO VIVO (AwesomeAPI); fallback R_FX. Converte o custo do RedTrack (R$) em US$.
   var fx = await liveFx(env);
@@ -453,19 +482,19 @@ async function collect(env) {
         byIC[String(row.sub3)] = parseInt(row['convtype' + icType]) || 0;
       }
     });
+    /* RedTrack fica SO p/ VENDAS e IC. GASTO e CLIQUES (de link) vem do Meta (batchTodayMeta). */
     var applyRt = function (c) {
       c._sales = by[String(c.id)] || 0;
-      c._clicks = byClicks[String(c.id)] || 0;
       c._ic = byIC[String(c.id)] || 0;
-      /* GASTO pelo RedTrack (R$ -> US$), mesma fonte/fuso das vendas. Senao, mantem o do Meta. */
-      var rc = byCost[String(c.id)] || 0;
-      if (rc > 0) c._spendToday = rc / fx;
+      c._spendToday = c._metaToday || 0;      /* GASTO = Meta */
+      c._clicks = c._metaLinkClicks || 0;     /* CLIQUES = cliques no link do Meta */
     };
     camps.forEach(applyRt);
-    DAILY_CAMPS.forEach(function (c) { c._spendToday = 0; applyRt(c); });
+    DAILY_CAMPS.forEach(applyRt);
   } else {
-    camps.forEach(function (c) { c._sales = 0; c._clicks = 0; c._ic = 0; });
-    DAILY_CAMPS.forEach(function (c) { c._sales = 0; c._clicks = 0; c._ic = 0; c._spendToday = 0; });
+    /* Sem RedTrack: sem vendas/IC, mas GASTO e CLIQUES do Meta seguem valendo. */
+    camps.forEach(function (c) { c._sales = 0; c._ic = 0; c._spendToday = c._metaToday || 0; c._clicks = c._metaLinkClicks || 0; });
+    DAILY_CAMPS.forEach(function (c) { c._sales = 0; c._ic = 0; c._spendToday = c._metaToday || 0; c._clicks = c._metaLinkClicks || 0; });
   }
   /* ROAS dos ULTIMOS 7 DIAS por campanha (RedTrack group=sub3) — so p/ a sugestao AUMENTAR (apos 20h).
      CACHE em KV por roas7dTtlMin(60) min: a janela de 7 dias muda devagar, e o RedTrack devolve 429
@@ -594,6 +623,57 @@ function metaMinCapCents(msg) {
   return Math.ceil(v * 100 * 1.03) + 100;
 }
 
+/* AGENDA DE ORCAMENTO (dayparting): nos horarios BR de RULES.budgetSchedule reseta TODA campanha CBO ativa.
+   CBO diario -> daily_budget = tgt. CBO total -> TERMINO p/ o diario desejado = tgt (via applyChange, mexe
+   nos conjuntos). 1x por slot por dia (KV budSched). Aplica so em live; em dry so REPORTA (Telegram). */
+async function runBudgetSchedule(env, camps, dailyCamps, applyMode, tokens) {
+  var sched = RULES.budgetSchedule || [];
+  var brMin = brHour() * 60 + brMinute();
+  var due = null;
+  for (var i = 0; i < sched.length; i++) {
+    var t = sched[i].h * 60 + sched[i].m;
+    if (brMin >= t && brMin < t + (RULES.schedWindowMin || 12)) { due = sched[i]; break; }
+  }
+  if (!due) return { due: null, applied: [] };
+  var today = brDatePlus(0);
+  var slotKey = ('0' + due.h).slice(-2) + ('0' + due.m).slice(-2);
+  var guard = {}; try { var g = await env.RULES_KV.get('budSched'); if (g) { var gj = JSON.parse(g); if (gj && typeof gj === 'object') guard = gj; } } catch (e) {}
+  var live = applyMode === 'live';
+  var applied = [], dirty = false;
+  var all = (camps || []).concat(dailyCamps || []);
+  for (var j = 0; j < all.length; j++) {
+    var c = all[j];
+    if ((c.effective_status || c.status || '').toUpperCase() !== 'ACTIVE') continue;
+    var gk = c.id + ':' + slotKey + ':' + today;
+    if (guard[gk]) continue; /* ja aplicou este slot hoje */
+    var isDaily = !c.lifetime_budget && !!c.daily_budget;
+    var okApplied = false, note = '';
+    if (live) {
+      try {
+        if (isDaily) {
+          await withTokenFallback(tokens, c._tk, function (tk) { return postForm(c.id, tk, { daily_budget: Math.round(due.tgt * 100) }); });
+          okApplied = true;
+        } else if (c.lifetime_budget) {
+          var rem = remainingOf(c);
+          if (rem > 0) {
+            var days = Math.min(RULES.cutDaysMax || 364, Math.max(1, Math.ceil(rem / due.tgt)));
+            if (days >= (RULES.cutDaysMax || 364)) note = ' (min ~$' + Math.round(rem / (RULES.cutDaysMax || 364)) + '/dia — teto de 1 ano)';
+            await applyChange(c, tokens, brDatePlus(days));
+            okApplied = true;
+          } else { note = ' (sem saldo)'; }
+        }
+      } catch (e) { note = ' (erro)'; }
+    }
+    guard[gk] = today; dirty = true;
+    applied.push({ id: c.id, name: c.name, tipo: isDaily ? 'diario' : 'total', tgt: due.tgt, ok: okApplied, note: note });
+  }
+  if (dirty) {
+    var clean = {}; Object.keys(guard).forEach(function (k) { if (guard[k] === today) clean[k] = today; });
+    try { await env.RULES_KV.put('budSched', JSON.stringify(clean)); } catch (e) {}
+  }
+  return { due: due, slotKey: slotKey, applied: applied };
+}
+
 /* ---------- execução principal ---------- */
 async function run(env) {
   RULES = buildRules(env); // aplica os parametros das variaveis do Cloudflare (ou os padroes)
@@ -610,6 +690,9 @@ async function run(env) {
   var tokens = JSON.parse(env.META_TOKENS || '[]');
   var camps = await collect(env);
   var moodObj = computeMood(camps);
+  /* AGENDA DE ORCAMENTO (dayparting) — reseta o orcamento nos horarios fixos (23:30/03:00/11:00 BR). */
+  var schedRes = await runBudgetSchedule(env, camps, DAILY_CAMPS, applyMode, tokens);
+  DIAG.sched = schedRes && schedRes.due ? { slot: schedRes.slotKey, tgt: schedRes.due.tgt, n: schedRes.applied.length } : null;
   /* Mapa da ULTIMA regra aplicada por campanha (compartilhado c/ o dashboard). Usado p/ NAO
      reaplicar a MESMA regra consecutivamente (ex: LIMITAR nao repete enquanto a campanha fica
      na faixa). Se ela MUDAR de regra (ex: vira ESCALAR) e DEPOIS voltar pra LIMITAR, reaplica,
@@ -659,7 +742,6 @@ async function run(env) {
   var reactList = [];  /* pausadas ha ~pauseAlertMin min (ROAS>1,3) -> aviso Telegram p/ reativar antes de 1h */
   var unlimitedList = []; /* limite REMOVIDO pelo robo (recuperou ROAS>1,5 na janela) -> aviso Telegram */
   var cortadaList = []; /* campanhas com RITMO REDUZIDO (termino +cutDays) neste ciclo -> aviso Telegram */
-  var subiuList = [];   /* campanhas que tiveram o DIARIO SUBIDO no reset da manha (9h) -> aviso Telegram */
   var restList = [];    /* campanhas que RECUPERARAM e tiveram o diario de antes do CORTAR devolvido -> Telegram */
   /* Momento em que o robo pausou cada campanha (KV) -> base do aviso "reative antes de 1h". */
   var pausedAt = {}; try { var pa = await env.RULES_KV.get('pausedAt'); if (pa) { var pj = JSON.parse(pa); if (pj && typeof pj === 'object') pausedAt = pj; } } catch (e) {}
@@ -752,7 +834,6 @@ async function run(env) {
         });
         if (histLog.length > 500) histLog = histLog.slice(0, 500);
         if (r.key === 'CORTAR') cortadaList.push({ id: c.id, name: c.name, action: r.action });
-        if (r.key === 'SUBIR_DIARIO') subiuList.push({ id: c.id, name: c.name, action: r.action });
         if (r.key === 'RESTAURAR') restList.push({ id: c.id, name: c.name, action: r.action });
         histDirty = true;
       }
@@ -836,17 +917,15 @@ async function run(env) {
         if (linesR2.length > 25) showR2.push('…e mais ' + (linesR2.length - 25) + ' campanha(s).');
         await sendTelegram(env, '\u{21A9}\u{FE0F} RECUPEROU — diário de antes do CORTAR devolvido em ' + linesR2.length + ' campanha(s):\n\n' + showR2.join('\n\n'));
       }
-      /* RESET DA MANHA (9h): diario subido p/ $120 em quem estava estrangulado. */
-      var linesS = [];
-      for (var si = 0; si < subiuList.length; si++) {
-        var ss2 = subiuList[si];
-        var ckS = ss2.id + ':subir';
-        if (canSend(ckS)) { linesS.push('• ' + ss2.name + '\n   ' + ss2.action); newSent[ckS] = nowT; }
-      }
-      if (linesS.length) {
-        var showS = linesS.slice(0, 25);
-        if (linesS.length > 25) showS.push('…e mais ' + (linesS.length - 25) + ' campanha(s).');
-        await sendTelegram(env, '\u{1F305} Reset da manhã — diário p/ $' + RULES.morningDaily + ' em ' + linesS.length + ' campanha(s):\n\n' + showS.join('\n\n'));
+      /* AGENDA DE ORCAMENTO (dayparting): reset por horario. 1x por slot (guard KV), entao nao precisa canSend. */
+      if (schedRes && schedRes.due && schedRes.applied && schedRes.applied.length) {
+        var linesSch = schedRes.applied.slice(0, 25).map(function (a) {
+          return '• ' + a.name + '\n   ' + (a.tipo === 'diario' ? 'orçamento diário' : 'término (diário desejado)') + ' → $' + a.tgt + '/dia' + (a.note || '') + (a.ok ? '' : ' [dry]');
+        });
+        if (schedRes.applied.length > 25) linesSch.push('…e mais ' + (schedRes.applied.length - 25) + ' campanha(s).');
+        var hhmmSch = ('0' + schedRes.due.h).slice(-2) + ':' + ('0' + schedRes.due.m).slice(-2);
+        var headSch = liveMode ? '\u{1F504} Reset de orçamento ' : '⚠️ Reset de orçamento (dry) ';
+        await sendTelegram(env, headSch + hhmmSch + ' BR → $' + schedRes.due.tgt + '/dia em ' + schedRes.applied.length + ' campanha(s):\n\n' + linesSch.join('\n\n'));
       }
       /* LIMITE REMOVIDO pelo robo (recuperou ROAS>1,5 na janela). */
       var linesU = [];
