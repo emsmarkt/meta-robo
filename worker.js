@@ -46,8 +46,8 @@ var RULES = {
   /* minutos de CACHE (KV) do ROAS 7 dias — evita o 429 do RedTrack (2 chamadas/ciclo a cada 5 min). */
   roas7dTtlMin: 60,
   alert3dRoas: 1.0, alert3dMinSpend: 150,
-  pauseCpc: 3, pauseSpend: 60, pauseAlertMin: 50,  // CPC>$3 E 0 venda/IC E gasto>$60 -> LIMITAR GASTO (soft-stop). pauseAlertMin: min pausada -> avisa p/ reativar
-  alertRepeatMin: 10,  // repete o MESMO aviso Telegram da campanha a cada X min enquanto o estado durar (antes era 1x/dia)
+  pauseCpc: 3, pauseSpend: 60, pauseAlertMin: 30, reactRoas: 1.4,  // AVISO REATIVAR: pausada ha >= pauseAlertMin(30) min E ROAS > reactRoas(1,4) -> Telegram (qualquer pausa, robo ou manual)
+  alertRepeatMin: 30,  // repete o MESMO aviso Telegram da campanha SO a cada X min enquanto o estado durar (30 min = pedido 24/07)
   cooldownMin: 5       // minutos entre 2 aplicacoes na MESMA campanha (configuravel via R_COOLDOWN). = 1 ciclo do cron
 };
 /* Le os parametros das variaveis do Cloudflare (se existirem), senao usa o padrao acima. */
@@ -75,7 +75,7 @@ function buildRules(env) {
     roas7dTtlMin: n('R_ROAS7DTTL', 60),
     scaleUsePct: n('R_SCALEUSEPCT', 0.2), releaseDaily: n('R_RELEASE', 500),
     alert3dRoas: n('R_ALERT3DROAS', 1.0), alert3dMinSpend: n('R_ALERT3DSPEND', 150),
-    pauseCpc: n('R_PAUSECPC', 3), pauseSpend: n('R_PAUSESPEND', 60), pauseAlertMin: n('R_PAUSEALERTMIN', 50), alertRepeatMin: n('R_ALERTREPEAT', 10),
+    pauseCpc: n('R_PAUSECPC', 3), pauseSpend: n('R_PAUSESPEND', 60), pauseAlertMin: n('R_PAUSEALERTMIN', 30), reactRoas: n('R_REACTROAS', 1.4), alertRepeatMin: n('R_ALERTREPEAT', 30),
     cooldownMin: n('R_COOLDOWN', 5)
   };
 }
@@ -857,9 +857,12 @@ async function run(env) {
        pausada ha >= pauseAlertMin(50) min (janela de 20 min) e ROAS>minRoas(1,3) -> entra no aviso. */
     var isActiveC = (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE';
     if (isActiveC) { if (pausedAt[c.id]) { delete pausedAt[c.id]; pausedAtDirty = true; } }
-    else if (pausedAt[c.id]) {
+    else {
+      /* PAUSADA por QUALQUER motivo (robo OU manual): registra quando o robo a viu pausada pela 1a vez. */
+      if (!pausedAt[c.id]) { pausedAt[c.id] = Date.now(); pausedAtDirty = true; }
       var elapP = Date.now() - pausedAt[c.id];
-      if (elapP >= RULES.pauseAlertMin * 60000 && r.roas > RULES.minRoas) {
+      /* AVISO p/ REATIVAR: pausada ha >= pauseAlertMin(30) min E ROAS > reactRoas(1,4). */
+      if (elapP >= RULES.pauseAlertMin * 60000 && r.roas > RULES.reactRoas) {
         reactList.push({ id: c.id, name: c.name, mins: Math.round(elapP / 60000), roas: +r.roas.toFixed(2) });
       }
     }
@@ -867,7 +870,7 @@ async function run(env) {
   if (appliedDirty) { try { await env.RULES_KV.put('applied', JSON.stringify(appliedMap)); } catch (e) {} }
   if (histDirty) { try { await env.RULES_KV.put('histLog', JSON.stringify(histLog)); } catch (e) {} }
   if (pausedAtDirty) {
-    var cutPa = Date.now() - (RULES.pauseAlertMin + 60) * 60000; /* poda registros antigos */
+    var cutPa = Date.now() - 26 * 3600000; /* poda so registros MUITO antigos (>26h) — nao zera a pausada ainda ativa */
     var cleanPa = {}; Object.keys(pausedAt).forEach(function (k) { if (pausedAt[k] >= cutPa) cleanPa[k] = pausedAt[k]; });
     try { await env.RULES_KV.put('pausedAt', JSON.stringify(cleanPa)); } catch (e) {}
   }
@@ -955,17 +958,17 @@ async function run(env) {
         var headU = liveMode ? '\u{2705} Robô REMOVEU o limite de ' : '⚠️ Robô REMOVERIA o limite (dry) de ';
         await sendTelegram(env, headU + linesU.length + ' campanha(s) que recuperou (ROAS>' + RULES.remLimRoas + '):\n\n' + showU.join('\n\n'));
       }
-      /* REATIVAR: pausadas ha >= pauseAlertMin min (ROAS>1,3), repete a cada alertRepeatMin ate reativar. */
+      /* REATIVAR: pausadas ha >= pauseAlertMin(30) min c/ ROAS > reactRoas(1,4), repete a cada alertRepeatMin(30). */
       var linesR = [];
       for (var ri = 0; ri < reactList.length; ri++) {
         var rr = reactList[ri];
         var rk = rr.id + ':react';
-        if (canSend(rk)) { linesR.push('• ' + rr.name + '\n   pausada ha ~' + rr.mins + ' min · ROAS ' + rr.roas.toFixed(2) + ' — REATIVE antes de 1h'); newSent[rk] = nowT; }
+        if (canSend(rk)) { linesR.push('• ' + rr.name + '\n   pausada ha ~' + rr.mins + ' min · ROAS ' + rr.roas.toFixed(2) + ' — vale REATIVAR'); newSent[rk] = nowT; }
       }
       if (linesR.length) {
         var showR = linesR.slice(0, 25);
         if (linesR.length > 25) showR.push('…e mais ' + (linesR.length - 25) + ' campanha(s).');
-        await sendTelegram(env, '⏰ REATIVAR ' + linesR.length + ' campanha(s) pausada(s) ha ~' + RULES.pauseAlertMin + ' min:\n\n' + showR.join('\n\n'));
+        await sendTelegram(env, '⏰ REATIVAR — ' + linesR.length + ' campanha(s) pausada(s) ha >' + RULES.pauseAlertMin + ' min com ROAS > ' + RULES.reactRoas + ':\n\n' + showR.join('\n\n'));
       }
       /* CBO DIARIO com metricas caras: ATIVA, gasto hoje >= dailyAlertSpend($100), 0 venda,
          CPC > dailyAlertCpc($2) E CPI > dailyAlertCpi($55). 1x por dia por campanha (chave c/ today). */
