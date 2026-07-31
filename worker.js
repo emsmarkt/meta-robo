@@ -25,7 +25,12 @@ var RULES = {
   /* AGENDA DE ORCAMENTO (dayparting): em horarios fixos BR reseta o orcamento de TODA campanha CBO ativa.
      CBO diario -> muda o daily_budget. CBO total -> muda o TERMINO p/ o diario desejado. Notifica no Telegram.
      Cron de 5 min pega o slot dentro da janela schedWindowMin. 1x por slot por dia (KV budSched). */
-  budgetSchedule: [{ h: 23, m: 30, tgt: 100 }, { h: 3, m: 0, tgt: 50, totalMax: true }, { h: 10, m: 30, tgt: 500 }],
+  budgetSchedule: [
+    /* 23:30 — ESCALONADO por VENDAS DE ONTEM: (diario=CBO diario, total=CBO total). >3 vd: $300/$1000; 1-3 vd: $130/$300; 0 vd: $70/$150. */
+    { h: 23, m: 30, tiers: [{ min: 4, daily: 300, total: 1000 }, { min: 1, daily: 130, total: 300 }, { min: 0, daily: 70, total: 150 }] },
+    { h: 3, m: 0, tgt: 50, totalMax: true },   /* 03:00 — CBO total vai p/ +364d; CBO diario $50 */
+    { h: 10, m: 30, tgt: 500 }                 /* 10:30 — $500/dia */
+  ],
   schedWindowMin: 12, cutDaysMax: 364,
   /* RESTAURAR: ultima mudanca de termino foi CORTAR e a campanha recuperou (ROAS > isso) -> devolve o diario de antes. */
   restoreRoas: 1.5,
@@ -64,11 +69,16 @@ function buildRules(env) {
     accBase: n('R_ACCBASE', 1.5), accGood: n('R_ACCGOOD', 1.35), accGoodMinSales: n('R_ACCGOODMINSALES', 2),
     cutNoSaleSpend: n('R_CUTNOSALE', 100),
     /* AGENDA de orcamento: R_BUDSCHED = "23:30=100,03:00=50,11:00=500" (hora BR = diario alvo). */
-    budgetSchedule: (function(){ var v = env && env.R_BUDSCHED; if (v) { var a = String(v).split(',').map(function(x){ var p = x.split('='); var hm = (p[0]||'').split(':'); var h = parseInt(hm[0]), mm = parseInt(hm[1]||'0'); var ts = (p[1]||'').trim(); var totalMax = /m$/i.test(ts); var tgt = parseFloat(ts); return (!isNaN(h) && !isNaN(tgt)) ? { h: h, m: isNaN(mm)?0:mm, tgt: tgt, totalMax: totalMax } : null; }).filter(function(x){ return x; }); if (a.length) return a; } return [{ h: 23, m: 30, tgt: 100 }, { h: 3, m: 0, tgt: 50, totalMax: true }, { h: 10, m: 30, tgt: 500 }]; })(),
+    /* Agenda hardcoded (23:30 escalonado por vendas de ontem nao cabe em string simples). Ver RULES.budgetSchedule acima. */
+    budgetSchedule: [
+      { h: 23, m: 30, tiers: [{ min: 4, daily: 300, total: 1000 }, { min: 1, daily: 130, total: 300 }, { min: 0, daily: 70, total: 150 }] },
+      { h: 3, m: 0, tgt: 50, totalMax: true },
+      { h: 10, m: 30, tgt: 500 }
+    ],
     schedWindowMin: n('R_SCHEDWIN', 12), cutDaysMax: n('R_CUTDAYSMAX', 364),
     restoreRoas: n('R_RESTOREROAS', 1.5),
     dailyAlertSpend: n('R_DAILYSPEND', 100), dailyAlertCpc: n('R_DAILYCPC', 2), dailyAlertCpi: n('R_DAILYCPI', 55),
-    scaleAlertRoas: n('R_SCALEALERTROAS', 1.5), scaleAlertDaily: n('R_SCALEALERTDAILY', 300),
+    scaleAlertRoas: n('R_SCALEALERTROAS', 1.5), scaleAlertRoasLow: n('R_SCALEALERTROASLOW', 1.7), scaleAlertSalesBreak: n('R_SCALEALERTSALESBRK', 3), scaleAlertDaily: n('R_SCALEALERTDAILY', 300),
     pauseRoas: n('R_PAUSEROAS', 1.7), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
     limSpendTrigger: n('R_LIMTRIG', 90), limSpendCap: n('R_LIMCAP', 120),
     limRoas: n('R_LIMROAS', 1.5), limMinSpend: n('R_LIMMINSPEND', 1),
@@ -640,9 +650,29 @@ function metaMinCapCents(msg) {
   return Math.ceil(v * 100 * 1.03) + 100;
 }
 
+/* Vendas de ONTEM por campanha (RedTrack group=sub3, date = ontem BR). Usado nos slots escalonados. */
+async function fetchYesterdaySales(env) {
+  var map = {};
+  if (!env.RT_TOKEN) return map;
+  try {
+    var pType = env.RT_PTYPE || '1';
+    var y = brDatePlus(-1);
+    var url = RT_API + '/report?api_key=' + encodeURIComponent(env.RT_TOKEN) + '&group=sub3&date_from=' + y + '&date_to=' + y + '&per=1000';
+    var resp = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0 (compatible; CBORobo/1.0)' } });
+    var d = await resp.json();
+    var rows = d.items || d.data || d.report || (Array.isArray(d) ? d : []);
+    (Array.isArray(rows) ? rows : []).forEach(function (row) {
+      if (row.sub3 == null) return;
+      var s = parseInt(row['convtype' + pType]) || parseInt(row.approved) || 0;
+      map[String(row.sub3)] = s;
+    });
+  } catch (e) {}
+  return map;
+}
+
 /* AGENDA DE ORCAMENTO (dayparting): nos horarios BR de RULES.budgetSchedule reseta TODA campanha CBO ativa.
-   CBO diario -> daily_budget = tgt. CBO total -> TERMINO p/ o diario desejado = tgt (via applyChange, mexe
-   nos conjuntos). 1x por slot por dia (KV budSched). Aplica so em live; em dry so REPORTA (Telegram). */
+   CBO diario -> daily_budget. CBO total -> TERMINO p/ o diario desejado (via applyChange, mexe nos conjuntos).
+   Slot pode ter `tgt` fixo (03:00/10:30) ou `tiers` por VENDAS DE ONTEM (23:30). 1x por slot/dia (KV budSched). */
 async function runBudgetSchedule(env, camps, dailyCamps, applyMode, tokens) {
   var sched = RULES.budgetSchedule || [];
   var brMin = brHour() * 60 + brMinute();
@@ -657,6 +687,8 @@ async function runBudgetSchedule(env, camps, dailyCamps, applyMode, tokens) {
   var guard = {}; try { var g = await env.RULES_KV.get('budSched'); if (g) { var gj = JSON.parse(g); if (gj && typeof gj === 'object') guard = gj; } } catch (e) {}
   var live = applyMode === 'live';
   var applied = [], dirty = false;
+  /* Slot ESCALONADO por vendas de ONTEM (ex.: 23:30) -> busca as vendas de ontem 1x. */
+  var yMap = due.tiers ? await fetchYesterdaySales(env) : null;
   var all = (camps || []).concat(dailyCamps || []);
   for (var j = 0; j < all.length; j++) {
     var c = all[j];
@@ -664,27 +696,39 @@ async function runBudgetSchedule(env, camps, dailyCamps, applyMode, tokens) {
     var gk = c.id + ':' + slotKey + ':' + today;
     if (guard[gk]) continue; /* ja aplicou este slot hoje */
     var isDaily = !c.lifetime_budget && !!c.daily_budget;
-    var okApplied = false, note = '';
+    /* alvos deste slot p/ esta campanha: fixo (tgt) OU faixa por vendas de ontem (tiers, ordenadas por min desc). */
+    var dailyTgt, totalTgt, totalMaxHere = false, ySales = 0;
+    if (due.tiers) {
+      ySales = (yMap && yMap[String(c.id)]) || 0;
+      var tier = null;
+      for (var ti = 0; ti < due.tiers.length; ti++) { if (ySales >= due.tiers[ti].min) { tier = due.tiers[ti]; break; } }
+      if (!tier) tier = due.tiers[due.tiers.length - 1];
+      dailyTgt = tier.daily; totalTgt = tier.total;
+    } else {
+      dailyTgt = due.tgt; totalTgt = due.tgt; totalMaxHere = !!due.totalMax;
+    }
+    var okApplied = false, note = due.tiers ? (' [' + ySales + ' venda(s) ontem]') : '';
+    var shownTgt = isDaily ? dailyTgt : totalTgt;
     if (live) {
       try {
         if (isDaily) {
-          await withTokenFallback(tokens, c._tk, function (tk) { return postForm(c.id, tk, { daily_budget: Math.round(due.tgt * 100) }); });
+          await withTokenFallback(tokens, c._tk, function (tk) { return postForm(c.id, tk, { daily_budget: Math.round(dailyTgt * 100) }); });
           okApplied = true;
         } else if (c.lifetime_budget) {
           var rem = remainingOf(c);
           if (rem > 0) {
             /* totalMax (ex.: slot 03:00): CBO total vai p/ +cutDaysMax(364)d direto (nao calcula do tgt). */
-            var days = due.totalMax ? (RULES.cutDaysMax || 364) : Math.min(RULES.cutDaysMax || 364, Math.max(1, Math.ceil(rem / due.tgt)));
-            if (!due.totalMax && days >= (RULES.cutDaysMax || 364)) note = ' (min ~$' + Math.round(rem / (RULES.cutDaysMax || 364)) + '/dia — teto de 1 ano)';
-            if (due.totalMax) note = ' (+' + days + 'd)';
+            var days = totalMaxHere ? (RULES.cutDaysMax || 364) : Math.min(RULES.cutDaysMax || 364, Math.max(1, Math.ceil(rem / totalTgt)));
+            if (!totalMaxHere && days >= (RULES.cutDaysMax || 364)) note += ' (min ~$' + Math.round(rem / (RULES.cutDaysMax || 364)) + '/dia — teto de 1 ano)';
+            if (totalMaxHere) note += ' (+' + days + 'd)';
             await applyChange(c, tokens, brDatePlus(days));
             okApplied = true;
-          } else { note = ' (sem saldo)'; }
+          } else { note += ' (sem saldo)'; }
         }
-      } catch (e) { note = ' (erro)'; }
+      } catch (e) { note += ' (erro)'; }
     }
     guard[gk] = today; dirty = true;
-    applied.push({ id: c.id, name: c.name, tipo: isDaily ? 'diario' : 'total', tgt: due.tgt, ok: okApplied, note: note });
+    applied.push({ id: c.id, name: c.name, tipo: isDaily ? 'diario' : 'total', tgt: shownTgt, ok: okApplied, note: note });
   }
   if (dirty) {
     var clean = {}; Object.keys(guard).forEach(function (k) { if (guard[k] === today) clean[k] = today; });
@@ -711,7 +755,7 @@ async function run(env) {
   var moodObj = computeMood(camps);
   /* AGENDA DE ORCAMENTO (dayparting) — reseta o orcamento nos horarios fixos (23:30/03:00/11:00 BR). */
   var schedRes = await runBudgetSchedule(env, camps, DAILY_CAMPS, applyMode, tokens);
-  DIAG.sched = schedRes && schedRes.due ? { slot: schedRes.slotKey, tgt: schedRes.due.tgt, n: schedRes.applied.length } : null;
+  DIAG.sched = schedRes && schedRes.due ? { slot: schedRes.slotKey, tiered: !!schedRes.due.tiers, n: schedRes.applied.length } : null;
   /* Mapa da ULTIMA regra aplicada por campanha (compartilhado c/ o dashboard). Usado p/ NAO
      reaplicar a MESMA regra consecutivamente (ex: LIMITAR nao repete enquanto a campanha fica
      na faixa). Se ela MUDAR de regra (ex: vira ESCALAR) e DEPOIS voltar pra LIMITAR, reaplica,
@@ -947,7 +991,8 @@ async function run(env) {
         if (schedRes.applied.length > 25) linesSch.push('…e mais ' + (schedRes.applied.length - 25) + ' campanha(s).');
         var hhmmSch = ('0' + schedRes.due.h).slice(-2) + ':' + ('0' + schedRes.due.m).slice(-2);
         var headSch = liveMode ? '\u{1F504} Reset de orçamento ' : '⚠️ Reset de orçamento (dry) ';
-        await sendTelegram(env, headSch + hhmmSch + ' BR → $' + schedRes.due.tgt + '/dia em ' + schedRes.applied.length + ' campanha(s):\n\n' + linesSch.join('\n\n'));
+        var sufSch = schedRes.due.tiers ? '(por vendas de ontem)' : ('→ $' + schedRes.due.tgt + '/dia');
+        await sendTelegram(env, headSch + hhmmSch + ' BR ' + sufSch + ' em ' + schedRes.applied.length + ' campanha(s):\n\n' + linesSch.join('\n\n'));
       }
       /* LIMITE REMOVIDO pelo robo (recuperou ROAS>1,5 na janela). */
       var linesU = [];
@@ -980,7 +1025,9 @@ async function run(env) {
       camps.concat(DAILY_CAMPS).forEach(function (c) {
         var spS = c._spendToday || 0, salesS = c._sales || 0;
         var roasS = spS > 0 ? (salesS * 260) / spS : 0;
-        if (roasS <= RULES.scaleAlertRoas) return;
+        /* piso por vendas: < scaleAlertSalesBreak(3) vendas -> scaleAlertRoasLow(1,7); >= 3 -> scaleAlertRoas(1,5). */
+        var thrS = salesS < RULES.scaleAlertSalesBreak ? RULES.scaleAlertRoasLow : RULES.scaleAlertRoas;
+        if (roasS <= thrS) return;
         var isActiveS = (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE';
         var isDailyS = !c.lifetime_budget && !!c.daily_budget;
         var effDaily = isDailyS ? (parseFloat(c.daily_budget) / 100) : currentDailyOf(c);
@@ -993,7 +1040,7 @@ async function run(env) {
       if (scaleLines.length) {
         var showSc = scaleLines.slice(0, 25);
         if (scaleLines.length > 25) showSc.push('…e mais ' + (scaleLines.length - 25) + ' campanha(s).');
-        await sendTelegram(env, '\u{1F680} OPORTUNIDADE — ' + scaleLines.length + ' campanha(s) PAUSADA ou diário < $' + RULES.scaleAlertDaily + ' com ROAS > ' + RULES.scaleAlertRoas + ':\n\n' + showSc.join('\n\n'));
+        await sendTelegram(env, '\u{1F680} OPORTUNIDADE — ' + scaleLines.length + ' campanha(s) PAUSADA ou diário < $' + RULES.scaleAlertDaily + ' com ROAS bom (>' + RULES.scaleAlertRoasLow + ' se <' + RULES.scaleAlertSalesBreak + ' vendas, senão >' + RULES.scaleAlertRoas + '):\n\n' + showSc.join('\n\n'));
       }
       /* CBO DIARIO com metricas caras: ATIVA, gasto hoje >= dailyAlertSpend($100), 0 venda,
          CPC > dailyAlertCpc($2) E CPI > dailyAlertCpi($55). 1x por dia por campanha (chave c/ today). */
