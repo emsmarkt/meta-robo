@@ -31,6 +31,8 @@ var RULES = {
   restoreRoas: 1.5,
   /* ALERTA (so Telegram) p/ CBO de orcamento DIARIO: ATIVA, gasto>=$120, 0 venda, CPC>$2 e CPI>$55 (metricas caras). */
   dailyAlertSpend: 100, dailyAlertCpc: 2, dailyAlertCpi: 55,
+  /* AVISO OPORTUNIDADE: campanha PAUSADA ou com diario < scaleAlertDaily($300) E ROAS > scaleAlertRoas(1,5) -> Telegram. */
+  scaleAlertRoas: 1.5, scaleAlertDaily: 300,
   /* SEM venda: gasto >= limSpendTrigger($90) -> LIMITAR, trava ~$120 o DIA INTEIRO (sem horario).
      A Meta forca travar em ~1,33x o gasto, entao 90 x 1,33 ~= 120 (teto real). */
   limSpendTrigger: 90, limSpendCap: 120,
@@ -65,6 +67,7 @@ function buildRules(env) {
     schedWindowMin: n('R_SCHEDWIN', 12), cutDaysMax: n('R_CUTDAYSMAX', 364),
     restoreRoas: n('R_RESTOREROAS', 1.5),
     dailyAlertSpend: n('R_DAILYSPEND', 100), dailyAlertCpc: n('R_DAILYCPC', 2), dailyAlertCpi: n('R_DAILYCPI', 55),
+    scaleAlertRoas: n('R_SCALEALERTROAS', 1.5), scaleAlertDaily: n('R_SCALEALERTDAILY', 300),
     pauseRoas: n('R_PAUSEROAS', 1.7), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
     limSpendTrigger: n('R_LIMTRIG', 90), limSpendCap: n('R_LIMCAP', 120),
     limRoas: n('R_LIMROAS', 1.5), limMinSpend: n('R_LIMMINSPEND', 1),
@@ -969,6 +972,27 @@ async function run(env) {
         var showR = linesR.slice(0, 25);
         if (linesR.length > 25) showR.push('…e mais ' + (linesR.length - 25) + ' campanha(s).');
         await sendTelegram(env, '⏰ REATIVAR — ' + linesR.length + ' campanha(s) pausada(s) ha >' + RULES.pauseAlertMin + ' min com ROAS > ' + RULES.reactRoas + ':\n\n' + showR.join('\n\n'));
+      }
+      /* OPORTUNIDADE: campanha PAUSADA ou com diario < scaleAlertDaily($300) E ROAS > scaleAlertRoas(1,5)
+         -> vale ESCALAR/REATIVAR. Varre camps (total) + DAILY_CAMPS (diario). Repete so a cada alertRepeatMin. */
+      var scaleLines = [];
+      camps.concat(DAILY_CAMPS).forEach(function (c) {
+        var spS = c._spendToday || 0, salesS = c._sales || 0;
+        var roasS = spS > 0 ? (salesS * 260) / spS : 0;
+        if (roasS <= RULES.scaleAlertRoas) return;
+        var isActiveS = (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE';
+        var isDailyS = !c.lifetime_budget && !!c.daily_budget;
+        var effDaily = isDailyS ? (parseFloat(c.daily_budget) / 100) : currentDailyOf(c);
+        if (!(!isActiveS || effDaily < RULES.scaleAlertDaily)) return; /* precisa estar PAUSADA ou diario < $300 */
+        var skS = c.id + ':scale';
+        if (!canSend(skS)) return;
+        scaleLines.push('• ' + c.name + '\n   ROAS ' + roasS.toFixed(2) + ' · ' + (isActiveS ? ('diário ~$' + Math.round(effDaily)) : 'PAUSADA') + ' — vale ESCALAR/REATIVAR');
+        newSent[skS] = nowT;
+      });
+      if (scaleLines.length) {
+        var showSc = scaleLines.slice(0, 25);
+        if (scaleLines.length > 25) showSc.push('…e mais ' + (scaleLines.length - 25) + ' campanha(s).');
+        await sendTelegram(env, '\u{1F680} OPORTUNIDADE — ' + scaleLines.length + ' campanha(s) PAUSADA ou diário < $' + RULES.scaleAlertDaily + ' com ROAS > ' + RULES.scaleAlertRoas + ':\n\n' + showSc.join('\n\n'));
       }
       /* CBO DIARIO com metricas caras: ATIVA, gasto hoje >= dailyAlertSpend($100), 0 venda,
          CPC > dailyAlertCpc($2) E CPI > dailyAlertCpi($55). 1x por dia por campanha (chave c/ today). */

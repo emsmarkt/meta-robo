@@ -61,6 +61,9 @@ R_CUTDAYSMAX = "364"   # teto de dias do termino (Meta rejeita >= 1 ano)
 R_DAILYSPEND = "100"   # gasto de hoje minimo p/ alertar
 R_DAILYCPC = "2"       # CPC (US$) acima disso = caro
 R_DAILYCPI = "55"      # CPI/custo por InitiateCheckout (US$) acima disso = caro
+# OPORTUNIDADE: campanha PAUSADA ou com diario < R_SCALEALERTDAILY E ROAS > R_SCALEALERTROAS -> aviso Telegram
+R_SCALEALERTROAS = "1.5"
+R_SCALEALERTDAILY = "300"
 # RESET: nas horas R_MORNHOURS BR (lista separada por virgula, ex "0,9"), campanha de orcamento TOTAL com gasto de hoje < R_MORNMAXSPEND
 # E diario atual < R_MORNMAXDAILY -> sobe o diario p/ R_MORNDAILY (via termino). 1x por dia.
 R_MORNHOURS = "0,9"    # horas BR do reset (00h e 9h, todo dia) — separadas por virgula
