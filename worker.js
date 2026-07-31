@@ -233,13 +233,11 @@ function suggestRule(c, mood) {
     var _cmp = sales >= RULES.aumMaxSales ? ' campea s/ aumento ha ' + (_incDays >= 9999 ? 'nunca' : _incDays + 'd') + ',' : '';
     return { action: 'AUMENTAR diario p/ $' + Math.round(targetA) + ' (' + RULES.aumMult + 'x —' + _cmp + ' ROAS hoje ' + roas.toFixed(2) + ', 7d ' + (c._roas7d || 0).toFixed(2) + ', apos ' + RULES.aumHourBR + 'h)', key: 'AUMENTAR', target: targetA, newEnd: newEndA, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   }
-  /* SEM VENDA hoje: gastou >= cutNoSaleSpend($100) -> CORTA (+cutDays 364d), a QUALQUER hora, 24h/dia.
-     ⚠️ SO corta se: (a) o RedTrack trouxe dados (c._rtOk) — se falhou, sales=0 e falso; (b) o Meta NAO viu
-     compra (c._metaPurch === 0) — cross-check anti-corte-errado (campanha "MÃE" nao casou no RedTrack mas vendeu).
-     Senao COLETANDO. */
+  /* SEM VENDA hoje (venda SO do RedTrack): gastou >= cutNoSaleSpend($100) -> CORTA (+cutDays 364d), 24h/dia. */
   if (sales === 0) {
-    var semVendaReal = c._rtOk && (c._metaPurch || 0) === 0;
-    if (sp >= RULES.cutNoSaleSpend && semVendaReal) return { action: 'CORTAR (+' + RULES.cutDays + 'd — $' + Math.round(sp) + ' hoje SEM venda)', key: 'CORTAR', target: cortarTarget, newEnd: cortarEnd, cpa: null, roas: 0, sales: 0, spend: sp };
+    /* Venda vem SO do RedTrack. So corta se o RedTrack trouxe dados no ciclo (c._rtOk) — se a busca falhou,
+       sales=0 e falso e cortaria todo mundo. NAO usa mais a compra do Meta como cross-check. */
+    if (sp >= RULES.cutNoSaleSpend && c._rtOk) return { action: 'CORTAR (+' + RULES.cutDays + 'd — $' + Math.round(sp) + ' hoje SEM venda)', key: 'CORTAR', target: cortarTarget, newEnd: cortarEnd, cpa: null, roas: 0, sales: 0, spend: sp };
     return { action: 'COLETANDO', key: 'COLETANDO', target: null, newEnd: null, cpa: Infinity, roas: 0, sales: 0, spend: sp };
   }
   /* COM VENDA e menos de aumMaxSales(5) vendas: ROAS < limRoas(1,4) -> CORTAR (+cutDays, reduz ritmo);
@@ -286,7 +284,7 @@ async function batchLifetimeSpend(camps, lifeRange) {
    e c._metaLinkClicks. Em LOTE (ate 50 ops/req) p/ nao estourar subrequests do Worker. */
 async function batchTodayMeta(camps) {
   var byTk = {};
-  camps.forEach(function (c) { c._metaToday = 0; c._metaLinkClicks = 0; c._metaPurch = 0; (byTk[c._tk] = byTk[c._tk] || []).push(c); });
+  camps.forEach(function (c) { c._metaToday = 0; c._metaLinkClicks = 0; (byTk[c._tk] = byTk[c._tk] || []).push(c); });
   for (var tk in byTk) {
     var list = byTk[tk];
     for (var i = 0; i < list.length; i += 50) {
@@ -294,7 +292,7 @@ async function batchTodayMeta(camps) {
       /* Fuso BR: gasto de MEIA-NOITE BR ate 23:59 BR = 1 dia. time_range c/ a data BR (a Meta usa o fuso da
          CONTA; se a conta estiver em Brasilia, bate exato). */
       var todayRange = encodeURIComponent(JSON.stringify({ since: brDatePlus(0), until: brDatePlus(0) }));
-      var batch = chunk.map(function (c) { return { method: 'GET', relative_url: c.id + '/insights?fields=spend,inline_link_clicks,actions&time_range=' + todayRange }; });
+      var batch = chunk.map(function (c) { return { method: 'GET', relative_url: c.id + '/insights?fields=spend,inline_link_clicks&time_range=' + todayRange }; });
       var body = new URLSearchParams();
       body.append('batch', JSON.stringify(batch));
       body.append('access_token', tk);
@@ -308,9 +306,6 @@ async function batchTodayMeta(camps) {
               var b = JSON.parse(item.body); var d0 = (b.data && b.data[0]) || null;
               c._metaToday = d0 ? (parseFloat(d0.spend) || 0) : 0;
               c._metaLinkClicks = d0 ? (parseInt(d0.inline_link_clicks) || 0) : 0;
-              /* COMPRAS pelo Meta (cross-check anti-corte-errado): se o Meta viu compra, NAO e "sem venda". */
-              c._metaPurch = 0;
-              if (d0 && d0.actions) d0.actions.forEach(function (a) { if (/purchase/i.test(a.action_type || '')) c._metaPurch = Math.max(c._metaPurch, parseInt(a.value) || 0); });
             } catch (e) {}
           });
         }
