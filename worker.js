@@ -31,8 +31,9 @@ var RULES = {
   restoreRoas: 1.5,
   /* ALERTA (so Telegram) p/ CBO de orcamento DIARIO: ATIVA, gasto>=$120, 0 venda, CPC>$2 e CPI>$55 (metricas caras). */
   dailyAlertSpend: 100, dailyAlertCpc: 2, dailyAlertCpi: 55,
-  /* AVISO OPORTUNIDADE: campanha PAUSADA ou com diario < scaleAlertDaily($300) E ROAS > scaleAlertRoas(1,5) -> Telegram. */
-  scaleAlertRoas: 1.5, scaleAlertDaily: 300,
+  /* AVISO OPORTUNIDADE: campanha PAUSADA ou com diario < scaleAlertDaily($300) -> Telegram, se o ROAS passar do
+     limiar por nº de vendas: < scaleAlertSalesBreak(3) vendas exige ROAS > scaleAlertRoasLow(1,7); >= 3 vendas exige ROAS > scaleAlertRoas(1,5). */
+  scaleAlertRoas: 1.5, scaleAlertRoasLow: 1.7, scaleAlertSalesBreak: 3, scaleAlertDaily: 300,
   /* SEM venda: gasto >= limSpendTrigger($90) -> LIMITAR, trava ~$120 o DIA INTEIRO (sem horario).
      A Meta forca travar em ~1,33x o gasto, entao 90 x 1,33 ~= 120 (teto real). */
   limSpendTrigger: 90, limSpendCap: 120,
