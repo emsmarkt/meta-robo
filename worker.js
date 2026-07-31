@@ -180,10 +180,18 @@ function computeMood(camps) {
   return { roas: r, mood: r >= RULES.dayGood ? 'good' : (r >= RULES.dayOk ? 'normal' : 'bad') };
 }
 function suggestRule(c, mood) {
-  /* TESTE — fora das regras: nome com "TESTE" nunca recebe corte/escala/limite.
-     target/newEnd null garante que o bloco de apply em run() (gate r.newEnd && r.key) nao aplica. */
-  if ((c.name || '').toUpperCase().indexOf('TESTE') >= 0) {
-    return { action: 'TESTE_FORA_DAS_REGRAS', key: 'TESTE', target: null, newEnd: null, cpa: Infinity, roas: 0, sales: c._sales || 0, spend: c._spendToday || 0 };
+  /* CP_TST (TESTE) — nome com "TST" ou "TESTE": FORA das regras de ROAS/pausa/escala/limite. A UNICA acao e o
+     corte por gasto SEM venda: gastou >= cutNoSaleSpend($100) hoje sem venda (RedTrack ok) -> CORTAR (+364d).
+     CP_VALD (validada) e as demais seguem as regras normais abaixo. */
+  var _nmU = (c.name || '').toUpperCase();
+  if (_nmU.indexOf('TST') >= 0 || _nmU.indexOf('TESTE') >= 0) {
+    var spT = c._spendToday || 0, salesT = c._sales || 0;
+    if (salesT === 0 && spT >= RULES.cutNoSaleSpend && c._rtOk) {
+      var remT = remainingOf(c);
+      return { action: 'CORTAR (+' + RULES.cutDays + 'd — teste $' + Math.round(spT) + ' s/ venda)', key: 'CORTAR', target: (remT > 0 ? remT / RULES.cutDays : RULES.floorDaily), newEnd: brDatePlus(RULES.cutDays), cpa: null, roas: 0, sales: 0, spend: spT };
+    }
+    var roasT = spT > 0 ? (salesT * 260) / spT : 0;
+    return { action: 'TESTE — só corta $' + RULES.cutNoSaleSpend + ' s/ venda' + (salesT ? (' (' + salesT + ' venda, ROAS ' + roasT.toFixed(2) + ')') : ''), key: salesT ? 'MANTER' : 'COLETANDO', target: null, newEnd: null, cpa: salesT ? spT / salesT : null, roas: roasT, sales: salesT, spend: spT };
   }
   var sp = c._spendToday || 0, sales = c._sales || 0;
   var roas = sp > 0 ? (sales * 260) / sp : 0;
@@ -570,12 +578,20 @@ async function applyChange(c, tokens, newEnd) {
   var endTs = Math.floor(new Date(endIso).getTime() / 1000);
   /* So o stop_time muda o ritmo da CBO; NAO reenviamos lifetime_budget (redundante e gatilho de erro). */
   var campParams = { stop_time: String(endTs) };
-  await withTokenFallback(tokens, c._tk, function (tk) { return postForm(c.id, tk, campParams); }).catch(function () {});
-  var setsR = await withTokenFallback(tokens, c._tk, function (tk) { return fj(API + '/' + c.id + '/adsets?fields=id&limit=200&access_token=' + tk).then(function (r) { if (r.error) throw new Error(r.error.message); return r; }); }).catch(function () { return { result: {} }; });
-  var sets = (setsR.result && setsR.result.data) || [];
-  for (var i = 0; i < sets.length; i++) {
-    await withTokenFallback(tokens, c._tk, function (tk) { return postForm(sets[i].id, tk, { end_time: endIso }); }).catch(function () {});
+  async function postCamp() { await withTokenFallback(tokens, c._tk, function (tk) { return postForm(c.id, tk, campParams); }).catch(function () {}); }
+  async function postSets() {
+    var setsR = await withTokenFallback(tokens, c._tk, function (tk) { return fj(API + '/' + c.id + '/adsets?fields=id&limit=200&access_token=' + tk).then(function (r) { if (r.error) throw new Error(r.error.message); return r; }); }).catch(function () { return { result: {} }; });
+    var sets = (setsR.result && setsR.result.data) || [];
+    for (var i = 0; i < sets.length; i++) {
+      await withTokenFallback(tokens, c._tk, function (tk) { return postForm(sets[i].id, tk, { end_time: endIso }); }).catch(function () {});
+    }
   }
+  /* CBO: campanha e conjuntos ficam travados na mesma data. ESTENDER (data pra frente) precisa subir o teto
+     na CAMPANHA primeiro, depois os conjuntos. ENCURTAR (data pra tras): conjuntos primeiro, depois campanha. */
+  var oldDay = null; try { if (c.stop_time) { var _so = (typeof c.stop_time === 'number') ? new Date(c.stop_time * 1000) : new Date(c.stop_time); oldDay = _so.toISOString().split('T')[0]; } } catch (e) {}
+  var extend = !oldDay || newEnd > oldDay;
+  if (extend) { await postCamp(); await postSets(); await postCamp(); }
+  else { await postSets(); await postCamp(); }
 }
 
 /* Aplica LIMITE DE GASTO (lifetime_spend_cap) nos conjuntos ATIVOS = soft-stop (NAO pausa, nao reseta aprendizado).
