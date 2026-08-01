@@ -28,7 +28,7 @@ var RULES = {
   budgetSchedule: [
     /* 23:30 — ESCALONADO por VENDAS DE ONTEM: (diario=CBO diario, total=CBO total). >3 vd: $300/$1000; 1-3 vd: $130/$300; 0 vd: $70/$150. */
     { h: 23, m: 30, tiers: [{ min: 4, daily: 300, total: 1000 }, { min: 1, daily: 130, total: 300 }, { min: 0, daily: 70, total: 150 }] },
-    { h: 3, m: 0, tgt: 50, totalMax: true },   /* 03:00 — CBO total vai p/ +364d; CBO diario $50 */
+    { h: 3, m: 0, tgt: 50, totalMax: true },   /* 03:00 — CBO total vai p/ +364d; CBO diario $50 (TST tbm entra, igual VALD) */
     { h: 10, m: 30, tgt: 500 }                 /* 10:30 — $500/dia */
   ],
   schedWindowMin: 12, cutDaysMax: 364,
@@ -180,19 +180,8 @@ function computeMood(camps) {
   return { roas: r, mood: r >= RULES.dayGood ? 'good' : (r >= RULES.dayOk ? 'normal' : 'bad') };
 }
 function suggestRule(c, mood) {
-  /* CP_TST (TESTE) — nome com "TST" ou "TESTE": FORA das regras de ROAS/pausa/escala/limite. A UNICA acao e o
-     corte por gasto SEM venda: gastou >= cutNoSaleSpend($100) hoje sem venda (RedTrack ok) -> CORTAR (+364d).
-     CP_VALD (validada) e as demais seguem as regras normais abaixo. */
-  var _nmU = (c.name || '').toUpperCase();
-  if (_nmU.indexOf('TST') >= 0 || _nmU.indexOf('TESTE') >= 0) {
-    var spT = c._spendToday || 0, salesT = c._sales || 0;
-    if (salesT === 0 && spT >= RULES.cutNoSaleSpend && c._rtOk) {
-      var remT = remainingOf(c);
-      return { action: 'CORTAR (+' + RULES.cutDays + 'd — teste $' + Math.round(spT) + ' s/ venda)', key: 'CORTAR', target: (remT > 0 ? remT / RULES.cutDays : RULES.floorDaily), newEnd: brDatePlus(RULES.cutDays), cpa: null, roas: 0, sales: 0, spend: spT };
-    }
-    var roasT = spT > 0 ? (salesT * 260) / spT : 0;
-    return { action: 'TESTE — só corta $' + RULES.cutNoSaleSpend + ' s/ venda' + (salesT ? (' (' + salesT + ' venda, ROAS ' + roasT.toFixed(2) + ')') : ''), key: salesT ? 'MANTER' : 'COLETANDO', target: null, newEnd: null, cpa: salesT ? spT / salesT : null, roas: roasT, sales: salesT, spend: spT };
-  }
+  /* CP_TST (teste) e CP_VALD (validada) seguem as MESMAS regras de ROAS/sem-venda abaixo (31/07 — TST entrou nas
+     regras normais). A UNICA diferenca fica no reset de orcamento: TST nao entra no slot 03:00 (ver runBudgetSchedule). */
   var sp = c._spendToday || 0, sales = c._sales || 0;
   var roas = sp > 0 ? (sales * 260) / sp : 0;
   var cpa = sales > 0 ? sp / sales : Infinity;
