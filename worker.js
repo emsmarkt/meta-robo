@@ -669,15 +669,20 @@ async function fetchYesterdaySales(env) {
 /* AGENDA DE ORCAMENTO (dayparting): nos horarios BR de RULES.budgetSchedule reseta TODA campanha CBO ativa.
    CBO diario -> daily_budget. CBO total -> TERMINO p/ o diario desejado (via applyChange, mexe nos conjuntos).
    Slot pode ter `tgt` fixo (03:00/10:30) ou `tiers` por VENDAS DE ONTEM (23:30). 1x por slot/dia (KV budSched). */
-async function runBudgetSchedule(env, camps, dailyCamps, applyMode, tokens) {
+async function runBudgetSchedule(env, camps, dailyCamps, applyMode, tokens, forceSlot) {
   var sched = RULES.budgetSchedule || [];
   var brMin = brHour() * 60 + brMinute();
-  var due = null;
-  for (var i = 0; i < sched.length; i++) {
-    var t = sched[i].h * 60 + sched[i].m;
-    if (brMin >= t && brMin < t + (RULES.schedWindowMin || 12)) { due = sched[i]; break; }
+  var due = null, forced = false;
+  if (forceSlot) {
+    /* DISPARO MANUAL (/run?sched=HHMM): ignora a janela de horario e o guard do dia -> aplica AGORA p/ testar. */
+    for (var fi = 0; fi < sched.length; fi++) { if ((('0' + sched[fi].h).slice(-2) + ('0' + sched[fi].m).slice(-2)) === forceSlot) { due = sched[fi]; forced = true; break; } }
+  } else {
+    for (var i = 0; i < sched.length; i++) {
+      var t = sched[i].h * 60 + sched[i].m;
+      if (brMin >= t && brMin < t + (RULES.schedWindowMin || 12)) { due = sched[i]; break; }
+    }
   }
-  if (!due) return { due: null, applied: [] };
+  if (!due) return { due: null, applied: [], forced: forced };
   var today = brDatePlus(0);
   var slotKey = ('0' + due.h).slice(-2) + ('0' + due.m).slice(-2);
   var guard = {}; try { var g = await env.RULES_KV.get('budSched'); if (g) { var gj = JSON.parse(g); if (gj && typeof gj === 'object') guard = gj; } } catch (e) {}
@@ -690,7 +695,7 @@ async function runBudgetSchedule(env, camps, dailyCamps, applyMode, tokens) {
     var c = all[j];
     if ((c.effective_status || c.status || '').toUpperCase() !== 'ACTIVE') continue;
     var gk = c.id + ':' + slotKey + ':' + today;
-    if (guard[gk]) continue; /* ja aplicou este slot hoje */
+    if (!forced && guard[gk]) continue; /* ja aplicou este slot hoje (disparo manual ignora o guard) */
     var isDaily = !c.lifetime_budget && !!c.daily_budget;
     /* alvos deste slot p/ esta campanha: fixo (tgt) OU faixa por vendas de ontem (tiers, ordenadas por min desc). */
     var dailyTgt, totalTgt, totalMaxHere = false, ySales = 0;
@@ -721,20 +726,25 @@ async function runBudgetSchedule(env, camps, dailyCamps, applyMode, tokens) {
             okApplied = true;
           } else { note += ' (sem saldo)'; }
         }
-      } catch (e) { note += ' (erro)'; }
+      } catch (e) { note += ' (ERRO: ' + (e && e.message ? String(e.message).slice(0, 90) : String(e)) + ')'; }
     }
-    guard[gk] = today; dirty = true;
+    /* SO marca "feito do dia" se aplicou DE VERDADE (live + okApplied). BUG CORRIGIDO 01/08: antes marcava o
+       guard p/ QUALQUER campanha processada — inclusive quando o POST FALHAVA (ex.: token morto) ou em DRY —
+       entao o slot era "consumido" sem aplicar e NUNCA reaplicava no dia (= "nao aplicou dia nenhum"). Agora:
+       falha/dry NAO consome o slot -> retenta nos proximos ciclos da janela e o erro aparece no Telegram. */
+    if (okApplied) { guard[gk] = today; dirty = true; }
     applied.push({ id: c.id, name: c.name, tipo: isDaily ? 'diario' : 'total', tgt: shownTgt, ok: okApplied, note: note });
   }
   if (dirty) {
     var clean = {}; Object.keys(guard).forEach(function (k) { if (guard[k] === today) clean[k] = today; });
     try { await env.RULES_KV.put('budSched', JSON.stringify(clean)); } catch (e) {}
   }
-  return { due: due, slotKey: slotKey, applied: applied };
+  return { due: due, slotKey: slotKey, applied: applied, forced: forced };
 }
 
 /* ---------- execução principal ---------- */
-async function run(env) {
+async function run(env, opts) {
+  var forceSched = (opts && opts.forceSched) || null; /* /run?sched=HHMM: dispara o reset daquele slot AGORA (teste) */
   RULES = buildRules(env); // aplica os parametros das variaveis do Cloudflare (ou os padroes)
   // chave-mestra liga/desliga (KV). Default ligado.
   var enabled = true;
@@ -750,8 +760,14 @@ async function run(env) {
   var camps = await collect(env);
   var moodObj = computeMood(camps);
   /* AGENDA DE ORCAMENTO (dayparting) — reseta o orcamento nos horarios fixos (23:30/03:00/11:00 BR). */
-  var schedRes = await runBudgetSchedule(env, camps, DAILY_CAMPS, applyMode, tokens);
-  DIAG.sched = schedRes && schedRes.due ? { slot: schedRes.slotKey, tiered: !!schedRes.due.tiers, n: schedRes.applied.length } : null;
+  var schedRes = await runBudgetSchedule(env, camps, DAILY_CAMPS, applyMode, tokens, forceSched);
+  DIAG.sched = schedRes && schedRes.due
+    ? { slot: schedRes.slotKey, tiered: !!schedRes.due.tiers, n: schedRes.applied.length,
+        ok: schedRes.applied.filter(function (a) { return a.ok; }).length,
+        fail: schedRes.applied.filter(function (a) { return !a.ok; }).length,
+        forced: !!schedRes.forced,
+        amostraErro: (schedRes.applied.filter(function (a) { return !a.ok && /ERRO/.test(a.note || ''); })[0] || {}).note || null }
+    : { due: null, agora: brHour() + ':' + ('0' + brMinute()).slice(-2) + ' BR (fora de janela — nenhum slot p/ aplicar)' };
   /* Mapa da ULTIMA regra aplicada por campanha (compartilhado c/ o dashboard). Usado p/ NAO
      reaplicar a MESMA regra consecutivamente (ex: LIMITAR nao repete enquanto a campanha fica
      na faixa). Se ela MUDAR de regra (ex: vira ESCALAR) e DEPOIS voltar pra LIMITAR, reaplica,
@@ -1072,7 +1088,8 @@ function jsonResp(obj) { return new Response(JSON.stringify(obj), { headers: Obj
 export default {
   async scheduled(event, env, ctx) { ctx.waitUntil(run(env)); },
   async fetch(request, env) {
-    var path = new URL(request.url).pathname;
+    var _u = new URL(request.url);
+    var path = _u.pathname;
     if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
 
     /* INTERRUPTOR LIVE/DRY do robo (KV `applyMode`). O dashboard le (GET) e liga/desliga (POST {mode}).
@@ -1135,7 +1152,12 @@ export default {
       return jsonResp(hist);
     }
 
-    if (path === '/run') { var r = await run(env); return jsonResp(r); }
+    if (path === '/run') {
+      /* /run?sched=HHMM (ex.: 0300, 1030, 2330) dispara o reset daquele slot AGORA, ignorando horario+guard (teste). */
+      var _slot = (_u.searchParams.get('sched') || '').replace(/[^0-9]/g, '');
+      var r = await run(env, _slot ? { forceSched: _slot } : null);
+      return jsonResp(r);
+    }
 
     var last = null; try { last = await env.RULES_KV.get('lastRun'); } catch (e) {}
     return new Response(last || '{"info":"sem execucao ainda. Acesse /run para rodar agora."}', { headers: Object.assign({ 'content-type': 'application/json' }, CORS) });
