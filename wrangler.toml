@@ -21,7 +21,7 @@ id = "62fa6d5180d6403f81a5485e1e77d5ea"
 [vars]
 # APPLY_MODE aqui e so o DEFAULT inicial. O interruptor LIVE/DRY do dashboard grava a chave KV
 # `applyMode`, que VENCE este valor no run() — entao o modo sobrevive a deploy (nao reverte mais).
-APPLY_MODE = "live"
+APPLY_MODE = "dry"
 RT_PTYPE = "1"
 RT_ICTYPE = "2"
 

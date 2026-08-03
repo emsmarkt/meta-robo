@@ -29,7 +29,7 @@ var RULES = {
     /* 23:30 — ESCALONADO por VENDAS DE ONTEM: (diario=CBO diario, total=CBO total). >3 vd: $300/$1000; 1-3 vd: $130/$300; 0 vd: $70/$150. */
     { h: 23, m: 30, tiers: [{ min: 4, daily: 300, total: 1000 }, { min: 1, daily: 130, total: 300 }, { min: 0, daily: 70, total: 150 }] },
     { h: 3, m: 0, tgt: 50, totalMax: true },   /* 03:00 — CBO total vai p/ +364d; CBO diario $50 (TST tbm entra, igual VALD) */
-    { h: 10, m: 30, tgt: 500 }                 /* 10:30 — $500/dia */
+    { h: 10, m: 30, tgt: 500, skipIfSales: true } /* 10:30 — $500/dia. NAO reseta campanha que ja tem venda hoje. */
   ],
   schedWindowMin: 12, cutDaysMax: 364,
   /* RESTAURAR: ultima mudanca de termino foi CORTAR e a campanha recuperou (ROAS > isso) -> devolve o diario de antes. */
@@ -70,7 +70,7 @@ function buildRules(env) {
     budgetSchedule: [
       { h: 23, m: 30, tiers: [{ min: 4, daily: 300, total: 1000 }, { min: 1, daily: 130, total: 300 }, { min: 0, daily: 70, total: 150 }] },
       { h: 3, m: 0, tgt: 50, totalMax: true },
-      { h: 10, m: 30, tgt: 500 }
+      { h: 10, m: 30, tgt: 500, skipIfSales: true }
     ],
     schedWindowMin: n('R_SCHEDWIN', 12), cutDaysMax: n('R_CUTDAYSMAX', 364),
     restoreRoas: n('R_RESTOREROAS', 1.5),
@@ -696,6 +696,7 @@ async function runBudgetSchedule(env, camps, dailyCamps, applyMode, tokens, forc
     if ((c.effective_status || c.status || '').toUpperCase() !== 'ACTIVE') continue;
     var gk = c.id + ':' + slotKey + ':' + today;
     if (!forced && guard[gk]) continue; /* ja aplicou este slot hoje (disparo manual ignora o guard) */
+    if (due.skipIfSales && (c._sales || 0) > 0) continue; /* 10:30: NAO reseta campanha que ja vendeu hoje (venda = RedTrack) */
     var isDaily = !c.lifetime_budget && !!c.daily_budget;
     /* alvos deste slot p/ esta campanha: fixo (tgt) OU faixa por vendas de ontem (tiers, ordenadas por min desc). */
     var dailyTgt, totalTgt, totalMaxHere = false, ySales = 0;
