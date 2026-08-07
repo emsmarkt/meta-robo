@@ -9,6 +9,7 @@ var RT_API = 'https://api.redtrack.io';
 var DIAG = {}; // diagnostico da ultima coleta (aparece no /run)
 var BLOCKED = [];     // contas BLOQUEADAS (status 2) que gastaram nos ult. 7 dias (p/ alerta Telegram)
 var ACCT_STATUS = {}; // id da conta -> account_status atual (p/ resetar o "ja avisei" quando reativa)
+var ACCT_ACTIVE_7D = {}; // id da conta (act_...) -> true se ATIVA (status 1) E gastou nos ult. 7 dias. O RESET so mexe nessas.
 var DAILY_CAMPS = []; // CBO de orcamento DIARIO — o robo NAO aplica regra nelas; so alerta metricas caras no Telegram
 
 /* Config das regras — padroes (iguais ao dashboard). Podem ser sobrescritos por VARIAVEIS
@@ -411,6 +412,28 @@ async function collect(env) {
     }
   }
   var accounts = Object.values(map).filter(function (acc) { var an = (acc.name || '').toLowerCase(); return an.indexOf('effective 01') < 0 && an.indexOf('origin') < 0 && an.indexOf('hhh hhh') < 0; });
+  /* CONTAS ATIVAS (status 1) COM ATIVIDADE nos ultimos 7 dias — o RESET de orcamento SO mexe nelas.
+     Gasto 7d em LOTE (Batch API) por token. ACCT_ACTIVE_7D[acc.id] = true se gastou > 0 nos ult. 7 dias. */
+  ACCT_ACTIVE_7D = {};
+  var act1 = accounts.filter(function (a) { return a.account_status === 1; });
+  var byTkA = {}; act1.forEach(function (a) { (byTkA[a._tk] = byTkA[a._tk] || []).push(a); });
+  for (var tkA in byTkA) {
+    var listA = byTkA[tkA];
+    for (var iA = 0; iA < listA.length; iA += 50) {
+      var chunkA = listA.slice(iA, iA + 50);
+      var batchA = chunkA.map(function (a) { return { method: 'GET', relative_url: a.id + '/insights?fields=spend&date_preset=last_7d&level=account' }; });
+      try {
+        var bodyA = new URLSearchParams(); bodyA.append('batch', JSON.stringify(batchA)); bodyA.append('access_token', tkA);
+        var respA = await fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: bodyA.toString() });
+        var arrA = await respA.json();
+        if (Array.isArray(arrA)) arrA.forEach(function (item, idx) {
+          var a = chunkA[idx], sp7 = 0;
+          try { var ba = JSON.parse(item.body); sp7 = (ba.data && ba.data[0]) ? parseFloat(ba.data[0].spend) || 0 : 0; } catch (e) {}
+          if (sp7 > 0) ACCT_ACTIVE_7D[a.id] = true;
+        });
+      } catch (e) {}
+    }
+  }
   var camps = [];
   DAILY_CAMPS = [];
   // Lista campanhas de TODAS as contas em LOTE por token (Meta Batch API) — poucos subrequests.
@@ -666,7 +689,31 @@ async function fetchYesterdaySales(env) {
   return map;
 }
 
-/* AGENDA DE ORCAMENTO (dayparting): nos horarios BR de RULES.budgetSchedule reseta TODA campanha CBO ativa.
+/* CONTAS com ATIVIDADE nos ultimos 7 dias (gasto > 0). Batch de insights por token (date_preset=last_7d).
+   Usado p/ o reset SO mexer em conta que rodou recentemente (ignora conta parada/desativada). */
+async function accounts7dActive(camps, prefTk) {
+  var byTk = {}, active = {};
+  (camps || []).forEach(function (c) { if (c._acctId) (byTk[c._tk || prefTk] = byTk[c._tk || prefTk] || {})[c._acctId] = true; });
+  for (var tk in byTk) {
+    var ids = Object.keys(byTk[tk]);
+    for (var j = 0; j < ids.length; j += 50) {
+      var chunk = ids.slice(j, j + 50);
+      var bb = chunk.map(function (id) { return { method: 'GET', relative_url: id + '/insights?fields=spend&date_preset=last_7d' }; });
+      try {
+        var body = new URLSearchParams(); body.append('batch', JSON.stringify(bb)); body.append('access_token', tk);
+        var resp = await fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() });
+        var arr = await resp.json();
+        if (Array.isArray(arr)) arr.forEach(function (item, idx) {
+          try { var b = JSON.parse(item.body); var sp = (b.data && b.data[0] && parseFloat(b.data[0].spend)) || 0; if (sp > 0) active[chunk[idx]] = true; } catch (e) {}
+        });
+      } catch (e) {}
+    }
+  }
+  return active;
+}
+
+/* AGENDA DE ORCAMENTO (dayparting): nos horarios BR de RULES.budgetSchedule reseta campanha CBO ativa, SO em
+   CONTA ATIVA (account_status=1) que teve GASTO nos ultimos 7 dias e com "CBO" no nome (as outras nao mexe).
    CBO diario -> daily_budget. CBO total -> TERMINO p/ o diario desejado (via applyChange, mexe nos conjuntos).
    Slot pode ter `tgt` fixo (03:00/10:30) ou `tiers` por VENDAS DE ONTEM (23:30). 1x por slot/dia (KV budSched). */
 async function runBudgetSchedule(env, camps, dailyCamps, applyMode, tokens, forceSlot) {
@@ -694,6 +741,10 @@ async function runBudgetSchedule(env, camps, dailyCamps, applyMode, tokens, forc
   for (var j = 0; j < all.length; j++) {
     var c = all[j];
     if ((c.effective_status || c.status || '').toUpperCase() !== 'ACTIVE') continue;
+    /* RESET SO MEXE EM: campanha com "CBO" no nome + conta ATIVA (status 1) com atividade nos ult. 7 dias.
+       O resto (sem "CBO", ou conta parada/bloqueada/sem gasto 7d) fica QUIETO — nao reseta. */
+    if ((c.name || '').toUpperCase().indexOf('CBO') < 0) continue;
+    if (!ACCT_ACTIVE_7D[c._acctId]) continue;
     var gk = c.id + ':' + slotKey + ':' + today;
     if (!forced && guard[gk]) continue; /* ja aplicou este slot hoje (disparo manual ignora o guard) */
     if (due.skipIfSales && (c._sales || 0) > 0) continue; /* 10:30: NAO reseta campanha que ja vendeu hoje (venda = RedTrack) */
