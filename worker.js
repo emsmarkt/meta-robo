@@ -518,8 +518,13 @@ async function collect(env) {
       }
     });
     /* RedTrack fica SO p/ VENDAS e IC. GASTO e CLIQUES (de link) vem do Meta (batchTodayMeta).
-       _rtOk = o RedTrack trouxe dados neste ciclo (se falhou, NAO corta ninguem como "sem venda"). */
-    var rtOk = Array.isArray(rows) && rows.length > 0;
+       _rtOk = a busca do RedTrack SUCEDEU (HTTP 200, sem erro de API/rede). Se sucedeu, venda=0 e REAL e o
+       robo PODE cortar sem-venda MESMO com 0 linhas. Só NAO corta se a busca FALHOU (429/5xx/erro/rede).
+       BUG CORRIGIDO 01/08 (madrugada): antes exigia rows.length>0 — de madrugada, quando NAO havia venda em
+       NENHUMA campanha, o relatorio vinha vazio (0 linhas, HTTP 200) e o robo NUNCA cortava as que queimavam
+       sem vender a noite toda. Relatorio vazio com 200 = genuinamente 0 venda -> deve cortar. */
+    var rtOk = (DIAG.rtHttp === 200) && !DIAG.rtFetchErr && !d.error;
+    DIAG.rtOk = rtOk;
     var applyRt = function (c) {
       c._sales = by[String(c.id)] || 0;
       c._ic = byIC[String(c.id)] || 0;
