@@ -817,14 +817,10 @@ async function run(env, opts) {
   var camps = await collect(env);
   var moodObj = computeMood(camps);
   /* AGENDA DE ORCAMENTO (dayparting) — reseta o orcamento nos horarios fixos (23:30/03:00/11:00 BR). */
-  var schedRes = await runBudgetSchedule(env, camps, DAILY_CAMPS, applyMode, tokens, forceSched);
-  DIAG.sched = schedRes && schedRes.due
-    ? { slot: schedRes.slotKey, tiered: !!schedRes.due.tiers, n: schedRes.applied.length,
-        ok: schedRes.applied.filter(function (a) { return a.ok; }).length,
-        fail: schedRes.applied.filter(function (a) { return !a.ok; }).length,
-        forced: !!schedRes.forced,
-        amostraErro: (schedRes.applied.filter(function (a) { return !a.ok && /ERRO/.test(a.note || ''); })[0] || {}).note || null }
-    : { due: null, agora: brHour() + ':' + ('0' + brMinute()).slice(-2) + ' BR (fora de janela — nenhum slot p/ aplicar)' };
+  /* RESETS DE ORCAMENTO (dayparting 23:30/03:00/10:30) REMOVIDOS (01/08) — o usuario ajusta o orcamento
+     MANUALMENTE pelo dashboard. O robo NAO mexe mais em orcamento por horario. */
+  var schedRes = null;
+  DIAG.sched = 'resets de orcamento REMOVIDOS (ajuste manual pelo dashboard)';
   /* Mapa da ULTIMA regra aplicada por campanha (compartilhado c/ o dashboard). Usado p/ NAO
      reaplicar a MESMA regra consecutivamente (ex: LIMITAR nao repete enquanto a campanha fica
      na faixa). Se ela MUDAR de regra (ex: vira ESCALAR) e DEPOIS voltar pra LIMITAR, reaplica,
@@ -892,18 +888,10 @@ async function run(env, opts) {
     /* DRY: avisa o que CORTARIA. Em LIVE a lista so recebe quando aplica de verdade (evita repetir todo ciclo). */
     if (r.key === 'CORTAR' && (applyMode) !== 'live' && !_jaAplicada) cortadaList.push({ id: c.id, name: c.name, action: r.action });
 
-    /* ── PAUSAR: status PAUSED. Registra em pausedList (dry E live, p/ Telegram). So pausa de verdade em live e se ativa. ── */
+    /* ── PAUSAR: o robo NAO pausa mais (01/08 — usuario pausa manualmente pelo dashboard). SO avisa no Telegram
+       (pausedList) que a campanha entrou na faixa de PAUSAR; nenhuma acao e aplicada. ── */
     if (r.key === 'PAUSAR') {
       if (!_jaAplicada) pausedList.push({ id: c.id, name: c.name, action: r.action });
-      if ((applyMode) === 'live' && (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') {
-        try {
-          await withTokenFallback(tokens, c._tk, function (tk) { return postForm(c.id, tk, { status: 'PAUSED' }); });
-          pausedAt[c.id] = Date.now(); pausedAtDirty = true; /* base do aviso "reative antes de 1h" */
-          histLog.unshift({ id: c.id, name: c.name, t: Date.now(), day: today, sig: 'PAUSAR', action: r.action, roas: +r.roas.toFixed(2), sales: r.sales, spend: Math.round(r.spend), dailyNew: null, endNew: null, source: 'robo', tkId: (c._tk ? String(c._tk).slice(-6) : '') });
-          if (histLog.length > 500) histLog = histLog.slice(0, 500);
-          histDirty = true;
-        } catch (e) {}
-      }
     } else if (r.key === 'REMLIMITE_AUTO') {
       /* ── RECUPEROU (ROAS>remLimRoas, janela remLimStart..remLimEnd): robo REMOVE o limite sozinho. ── */
       if (!_jaAplicada) unlimitedList.push({ id: c.id, name: c.name, roas: +r.roas.toFixed(2) });
@@ -1011,8 +999,7 @@ async function run(env, opts) {
       if (lines.length) {
         var show = lines.slice(0, 25);
         if (lines.length > 25) show.push('…e mais ' + (lines.length - 25) + ' campanha(s).');
-        var head = liveMode ? '\u{1F6D1} Robô PAUSOU ' : '⚠️ Robô PAUSARIA (dry, não pausou) ';
-        await sendTelegram(env, head + lines.length + ' campanha(s):\n\n' + show.join('\n\n'));
+        await sendTelegram(env, '\u{1F7E1} Faixa de PAUSAR (robô NÃO pausa — pause no dash se quiser) — ' + lines.length + ' campanha(s):\n\n' + show.join('\n\n'));
       }
       /* LIMITE DE GASTO (soft-stop sem venda). */
       var linesL = [];
