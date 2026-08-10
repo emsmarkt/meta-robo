@@ -181,8 +181,13 @@ function computeMood(camps) {
   return { roas: r, mood: r >= RULES.dayGood ? 'good' : (r >= RULES.dayOk ? 'normal' : 'bad') };
 }
 function suggestRule(c, mood) {
-  /* CP_TST (teste) e CP_VALD (validada) seguem as MESMAS regras de ROAS/sem-venda abaixo (31/07 — TST entrou nas
-     regras normais). A UNICA diferenca fica no reset de orcamento: TST nao entra no slot 03:00 (ver runBudgetSchedule). */
+  var _nmU = (c.name || '').toUpperCase();
+  /* CP_VALD (validada): FORA das regras de CORTAR/ROAS/pausa (01/08). O robo NAO mexe — Emerson gerencia MANUAL.
+     So gera um AVISO 1x/dia no Telegram (ver run(): junta os key==='VALD' em valdList). CP_TST segue as regras normais. */
+  if (_nmU.indexOf('VALD') >= 0) {
+    var spV = c._spendToday || 0, salesV = c._sales || 0, roasV = spV > 0 ? (salesV * 260) / spV : 0;
+    return { action: 'VALD — gestão manual (robô só avisa 1x/dia)', key: 'VALD', target: null, newEnd: null, cpa: salesV > 0 ? spV / salesV : null, roas: roasV, sales: salesV, spend: spV };
+  }
   var sp = c._spendToday || 0, sales = c._sales || 0;
   var roas = sp > 0 ? (sales * 260) / sp : 0;
   var cpa = sales > 0 ? sp / sales : Infinity;
@@ -871,6 +876,7 @@ async function run(env, opts) {
   var unlimitedList = []; /* limite REMOVIDO pelo robo (recuperou ROAS>1,5 na janela) -> aviso Telegram */
   var cortadaList = []; /* campanhas com RITMO REDUZIDO (termino +cutDays) neste ciclo -> aviso Telegram */
   var restList = [];    /* campanhas que RECUPERARAM e tiveram o diario de antes do CORTAR devolvido -> Telegram */
+  var valdList = [];    /* CP_VALD (gestao manual): fora das regras -> so DIGEST 1x/dia no Telegram (nenhuma acao) */
   /* Momento em que o robo pausou cada campanha (KV) -> base do aviso "reative antes de 1h". */
   var pausedAt = {}; try { var pa = await env.RULES_KV.get('pausedAt'); if (pa) { var pj = JSON.parse(pa); if (pj && typeof pj === 'object') pausedAt = pj; } } catch (e) {}
   var pausedAtDirty = false;
@@ -884,6 +890,9 @@ async function run(env, opts) {
        depois de aplicar, entao sem esta guarda o Telegram repetia a cada ciclo, p/ sempre.) */
     var _prevAp = appliedMap[c.id];
     var _jaAplicada = !!(_prevAp && _prevAp.day === today && _prevAp.sig === r.key);
+
+    /* CP_VALD: robo NAO aplica nada — so junta p/ o DIGEST 1x/dia (so as ATIVAS). */
+    if (r.key === 'VALD') { if ((c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') valdList.push({ id: c.id, name: c.name, spend: Math.round(r.spend), sales: r.sales, roas: +r.roas.toFixed(2) }); continue; }
 
     /* DRY: avisa o que CORTARIA. Em LIVE a lista so recebe quando aplica de verdade (evita repetir todo ciclo). */
     if (r.key === 'CORTAR' && (applyMode) !== 'live' && !_jaAplicada) cortadaList.push({ id: c.id, name: c.name, action: r.action });
@@ -1049,6 +1058,19 @@ async function run(env, opts) {
         var headSch = liveMode ? '\u{1F504} Reset de orçamento ' : '⚠️ Reset de orçamento (dry) ';
         var sufSch = schedRes.due.tiers ? '(por vendas de ontem)' : ('→ $' + schedRes.due.tgt + '/dia');
         await sendTelegram(env, headSch + hhmmSch + ' BR ' + sufSch + ' em ' + schedRes.applied.length + ' campanha(s):\n\n' + linesSch.join('\n\n'));
+      }
+      /* CP_VALD (gestao manual): DIGEST 1x/dia. Lista as VALD ATIVAS com gasto/venda/ROAS p/ o Emerson decidir.
+         Guard KV `valdDay` = ultimo dia enviado -> 1x por dia (independente de live/dry; e so aviso). */
+      if (valdList.length) {
+        var valdDay = null; try { valdDay = await env.RULES_KV.get('valdDay'); } catch (e) {}
+        if (valdDay !== today) {
+          var linesV = valdList.slice(0, 40).map(function (v) {
+            return '• ' + v.name + '\n   gasto $' + v.spend + ' · ' + v.sales + ' venda(s) · ROAS ' + v.roas.toFixed(2);
+          });
+          if (valdList.length > 40) linesV.push('…e mais ' + (valdList.length - 40) + ' campanha(s).');
+          await sendTelegram(env, '\u{1F4CB} VALD (gestão manual) — ' + valdList.length + ' campanha(s) ativa(s) hoje. Robô NÃO mexe; você decide:\n\n' + linesV.join('\n\n'));
+          try { await env.RULES_KV.put('valdDay', today); } catch (e) {}
+        }
       }
       /* LIMITE REMOVIDO pelo robo (recuperou ROAS>1,5 na janela). */
       var linesU = [];
