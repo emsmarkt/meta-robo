@@ -281,33 +281,62 @@ async function batchLifetimeSpend(camps, lifeRange) {
 /* GASTO de HOJE + cliques no LINK de hoje, por campanha (Meta Batch API, date_preset=today).
    GASTO = fonte confiavel = FACEBOOK/Meta (o custo do RedTrack estava errado). Popula c._metaToday
    e c._metaLinkClicks. Em LOTE (ate 50 ops/req) p/ nao estourar subrequests do Worker. */
+/* Soma spend/clicks das HORAS (breakdown hourly no fuso da CONTA) que caem no DIA do BRASIL
+   (00:00-23:59 BR = 03:00 UTC de hoje ate 03:00 UTC de amanha). local -> UTC: UTC = local - offset. */
+function sumBrDayHourly(rows, brDate, offsetHours) {
+  var startUTC = Date.parse(brDate + 'T03:00:00Z');
+  var endUTC = startUTC + 24 * 3600 * 1000;
+  var sp = 0, clk = 0;
+  (rows || []).forEach(function (r) {
+    var ld = r.date_start; if (!ld) return;
+    var hb = r.hourly_stats_aggregated_by_advertiser_time_zone || '';
+    var hh = parseInt(hb.slice(0, 2)); if (isNaN(hh)) hh = 0;
+    var realUTC = Date.parse(ld + 'T' + ('0' + hh).slice(-2) + ':00:00Z') - offsetHours * 3600 * 1000;
+    if (realUTC >= startUTC && realUTC < endUTC) { sp += parseFloat(r.spend) || 0; clk += parseInt(r.inline_link_clicks) || 0; }
+  });
+  return { spend: sp, clicks: clk };
+}
+
 async function batchTodayMeta(camps) {
   var byTk = {};
   camps.forEach(function (c) { c._metaToday = 0; c._metaLinkClicks = 0; (byTk[c._tk] = byTk[c._tk] || []).push(c); });
+  var brToday = brDatePlus(0);
+  /* Fuso BR: gasto de MEIA-NOITE BR ate 23:59 BR = 1 dia. */
+  var todayRange = encodeURIComponent(JSON.stringify({ since: brToday, until: brToday }));
+  /* Metodo por HORA (contas fora de UTC-3): janela ampla D-1..D+1 no fuso da conta cobre o dia BR em qualquer fuso. */
+  var wideRange = encodeURIComponent(JSON.stringify({ since: brDatePlus(-1), until: brDatePlus(1) }));
+  /* -3 = Brasilia; offset null/indefinido -> trata como BR (padrao antigo, seguro). */
+  var isBrTz = function (c) { var o = c._acctOffset; return o == null || Number(o) === -3; };
   for (var tk in byTk) {
     var list = byTk[tk];
-    for (var i = 0; i < list.length; i += 50) {
-      var chunk = list.slice(i, i + 50);
-      /* Fuso BR: gasto de MEIA-NOITE BR ate 23:59 BR = 1 dia. time_range c/ a data BR (a Meta usa o fuso da
-         CONTA; se a conta estiver em Brasilia, bate exato). */
-      var todayRange = encodeURIComponent(JSON.stringify({ since: brDatePlus(0), until: brDatePlus(0) }));
+    var brC = list.filter(isBrTz);
+    var offC = list.filter(function (c) { return !isBrTz(c); });
+    /* 1) contas em BR (ou fuso desconhecido): time_range com a data BR (a Meta le no fuso da conta = BR -> bate). */
+    for (var i = 0; i < brC.length; i += 50) {
+      var chunk = brC.slice(i, i + 50);
       var batch = chunk.map(function (c) { return { method: 'GET', relative_url: c.id + '/insights?fields=spend,inline_link_clicks&time_range=' + todayRange }; });
-      var body = new URLSearchParams();
-      body.append('batch', JSON.stringify(batch));
-      body.append('access_token', tk);
+      var body = new URLSearchParams(); body.append('batch', JSON.stringify(batch)); body.append('access_token', tk);
       try {
         var resp = await fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() });
         var arr = await resp.json();
-        if (Array.isArray(arr)) {
-          arr.forEach(function (item, idx) {
-            var c = chunk[idx];
-            try {
-              var b = JSON.parse(item.body); var d0 = (b.data && b.data[0]) || null;
-              c._metaToday = d0 ? (parseFloat(d0.spend) || 0) : 0;
-              c._metaLinkClicks = d0 ? (parseInt(d0.inline_link_clicks) || 0) : 0;
-            } catch (e) {}
-          });
-        }
+        if (Array.isArray(arr)) arr.forEach(function (item, idx) {
+          var c = chunk[idx];
+          try { var b = JSON.parse(item.body); var d0 = (b.data && b.data[0]) || null; c._metaToday = d0 ? (parseFloat(d0.spend) || 0) : 0; c._metaLinkClicks = d0 ? (parseInt(d0.inline_link_clicks) || 0) : 0; } catch (e) {}
+        });
+      } catch (e) {}
+    }
+    /* 2) contas em OUTRO fuso: breakdown por HORA no fuso da conta -> soma so as horas que caem no dia BR. */
+    for (var k = 0; k < offC.length; k += 50) {
+      var chunkO = offC.slice(k, k + 50);
+      var batchO = chunkO.map(function (c) { return { method: 'GET', relative_url: c.id + '/insights?fields=spend,inline_link_clicks&time_increment=1&breakdowns=hourly_stats_aggregated_by_advertiser_time_zone&time_range=' + wideRange }; });
+      var bodyO = new URLSearchParams(); bodyO.append('batch', JSON.stringify(batchO)); bodyO.append('access_token', tk);
+      try {
+        var respO = await fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: bodyO.toString() });
+        var arrO = await respO.json();
+        if (Array.isArray(arrO)) arrO.forEach(function (item, idx) {
+          var c = chunkO[idx];
+          try { var b = JSON.parse(item.body); var agg = sumBrDayHourly((b.data) || [], brToday, Number(c._acctOffset)); c._metaToday = agg.spend; c._metaLinkClicks = agg.clicks; } catch (e) {}
+        });
       } catch (e) {}
     }
   }
@@ -389,7 +418,7 @@ async function collect(env) {
   var tokens = JSON.parse(env.META_TOKENS || '[]');
   var map = {};
   for (var ti = 0; ti < tokens.length; ti++) {
-    var list = await fjPaged(API + '/me/adaccounts?fields=name,account_status&limit=100&access_token=' + tokens[ti]);
+    var list = await fjPaged(API + '/me/adaccounts?fields=name,account_status,timezone_offset_hours_utc,timezone_name&limit=100&access_token=' + tokens[ti]);
     list.forEach(function (a) { var id = a.id.replace('act_', ''); if (!map[id]) { map[id] = a; map[id]._tk = tokens[ti]; } });
   }
   /* Mapa de status atual (p/ resetar o "ja avisei" quando a conta volta a ativa). */
@@ -463,10 +492,10 @@ async function collect(env) {
               if (es === 'DELETED' || es === 'ARCHIVED') return;
               var isCbo = c.name && c.name.toUpperCase().indexOf('CBO') >= 0 && c.name.toUpperCase().indexOf('SUBSTITUIDA') < 0;
               if (isCbo && c.lifetime_budget) {
-                c._tk = acc._tk; c._acctStatus = acc.account_status; c._acctId = acc.id; camps.push(c);
+                c._tk = acc._tk; c._acctStatus = acc.account_status; c._acctId = acc.id; c._acctOffset = acc.timezone_offset_hours_utc; camps.push(c);
               } else if (isCbo && c.daily_budget) {
                 /* CBO de orcamento DIARIO: fora do motor de regras; entra so p/ o ALERTA de metricas caras. */
-                c._tk = acc._tk; c._acctStatus = acc.account_status; c._acctId = acc.id; DAILY_CAMPS.push(c);
+                c._tk = acc._tk; c._acctStatus = acc.account_status; c._acctId = acc.id; c._acctOffset = acc.timezone_offset_hours_utc; DAILY_CAMPS.push(c);
               }
             });
           });
