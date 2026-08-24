@@ -490,7 +490,7 @@ async function collect(env) {
             cs.forEach(function (c) {
               var es = (c.effective_status || c.status || '').toUpperCase();
               if (es === 'DELETED' || es === 'ARCHIVED') return;
-              var isCbo = c.name && c.name.toUpperCase().indexOf('CBO') >= 0 && c.name.toUpperCase().indexOf('SUBSTITUIDA') < 0;
+              var isCbo = c.name && c.name.toUpperCase().indexOf('CBO') >= 0 && c.name.toUpperCase().indexOf('SUBSTITUIDA') < 0 && c.name.toUpperCase().indexOf('MORTA') < 0;
               if (isCbo && c.lifetime_budget) {
                 c._tk = acc._tk; c._acctStatus = acc.account_status; c._acctId = acc.id; c._acctOffset = acc.timezone_offset_hours_utc; camps.push(c);
               } else if (isCbo && c.daily_budget) {
