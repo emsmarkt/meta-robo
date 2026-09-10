@@ -1209,17 +1209,23 @@ async function run(env, opts) {
       if (bDirty) { try { await env.RULES_KV.put('blockedNotified', JSON.stringify(bNotif)); } catch (e) {} }
 
       /* ── ANÚNCIO REJEITADO/DESATIVADO pela Meta: avisa no Telegram com CAMPANHA + ANÚNCIO + MOTIVO.
-         1x por rejeição (dedup por adId no KV 'adRejNotified' = { adId: status }). O map salvo é só o
-         estado ATUAL — anúncio que recuperar sai do map e, se for rejeitado de novo depois, avisa outra
-         vez. Se mudar de WITH_ISSUES p/ DISAPPROVED (status diferente), avisa de novo. ── */
+         **UMA VEZ SÓ por anúncio** (o Emerson pediu: nada de duplicado). O KV 'adRejNotified' é um
+         registro PERMANENTE { adId: timestamp } — se o adId já está lá, NUNCA avisa de novo (não importa
+         se muda de WITH_ISSUES p/ DISAPPROVED nem se recupera e cai de novo). MERGE (mantém os antigos),
+         então a consistência eventual do KV não re-notifica. Dedup também DENTRO do ciclo (seen) caso o
+         mesmo adId volte 2x na varredura. Poda registros > 90 dias p/ não crescer sem fim. ── */
       var rejList = await checkAdRejections(env, camps.concat(DAILY_CAMPS));
       DIAG.adRej = rejList.length;
       var rNotif = {}; try { var rs = await env.RULES_KV.get('adRejNotified'); if (rs) { var rj = JSON.parse(rs); if (rj && typeof rj === 'object') rNotif = rj; } } catch (e) {}
-      var curRej = {}, linesRej = [];
+      /* Migra registros da versão antiga (valor era o STATUS em texto) p/ timestamp — sem re-avisar na virada. */
+      Object.keys(rNotif).forEach(function (k) { if (typeof rNotif[k] !== 'number') rNotif[k] = nowT; });
+      var linesRej = [], rejDirty = false, seenRej = {};
       for (var rji = 0; rji < rejList.length; rji++) {
         var rd = rejList[rji];
-        curRej[rd.adId] = rd.status;
-        if (rNotif[rd.adId] === rd.status) continue; /* ja avisado nesse mesmo status */
+        if (seenRej[rd.adId]) continue;        /* mesmo anúncio 2x no mesmo ciclo */
+        seenRej[rd.adId] = true;
+        if (rNotif[rd.adId]) continue;          /* JÁ avisado alguma vez -> nunca repete */
+        rNotif[rd.adId] = nowT; rejDirty = true;
         var stTxt = rd.status === 'DISAPPROVED' ? 'REJEITADO' : 'com problema (WITH_ISSUES)';
         linesRej.push('• Campanha: ' + rd.campName + '\n   Anúncio: ' + rd.adName + '\n   Status: ' + stTxt + '\n   Motivo: ' + (rd.reason || '(não informado pela Meta)'));
       }
@@ -1228,7 +1234,11 @@ async function run(env, opts) {
         if (linesRej.length > 20) showRej.push('…e mais ' + (linesRej.length - 20) + ' anúncio(s).');
         await sendTelegram(env, '\u{1F6D1} Anúncio(s) REJEITADO/DESATIVADO pela Meta — ' + linesRej.length + ' novo(s):\n\n' + showRej.join('\n\n'));
       }
-      try { await env.RULES_KV.put('adRejNotified', JSON.stringify(curRej)); } catch (e) {}
+      if (rejDirty) {
+        var cutRej = nowT - 90 * 86400000; /* poda registros com mais de 90 dias */
+        var cleanRej = {}; Object.keys(rNotif).forEach(function (k) { if (typeof rNotif[k] === 'number' && rNotif[k] >= cutRej) cleanRej[k] = rNotif[k]; });
+        try { await env.RULES_KV.put('adRejNotified', JSON.stringify(cleanRej)); } catch (e) {}
+      }
     } catch (e) { DIAG.tgErr = String((e && e.message) || e); }
   }
   DIAG.blocked = BLOCKED.length; /* visivel no /run */
