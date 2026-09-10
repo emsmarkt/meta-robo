@@ -833,6 +833,45 @@ async function runBudgetSchedule(env, camps, dailyCamps, applyMode, tokens, forc
   return { due: due, slotKey: slotKey, applied: applied, forced: forced };
 }
 
+/* ── ANÚNCIOS REJEITADOS/DESATIVADOS pela Meta: varre os anúncios das campanhas coletadas (as mesmas
+   que aparecem no dash) e devolve os que estão DISAPPROVED (rejeitado) ou WITH_ISSUES, com o MOTIVO
+   (issues_info.error_summary/message), nome da CAMPANHA e nome do ANÚNCIO. Filtra por effective_status
+   na própria edge /ads (só puxa os rejeitados = leve) e roda em LOTE por token (50 campanhas/chamada,
+   Batch API) p/ não estourar rate limit. */
+async function checkAdRejections(env, allCamps) {
+  var out = [];
+  var byTk = {};
+  allCamps.forEach(function (c) { if (c && c.id && c._tk) (byTk[c._tk] = byTk[c._tk] || []).push(c); });
+  var rel = 'ads?fields=name,effective_status,issues_info&effective_status=' + encodeURIComponent('["DISAPPROVED","WITH_ISSUES"]') + '&limit=100';
+  for (var tk in byTk) {
+    var list = byTk[tk];
+    for (var i = 0; i < list.length; i += 50) {
+      var chunk = list.slice(i, i + 50);
+      var batch = chunk.map(function (c) { return { method: 'GET', relative_url: c.id + '/' + rel }; });
+      try {
+        var body = new URLSearchParams(); body.append('batch', JSON.stringify(batch)); body.append('access_token', tk);
+        var resp = await fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() });
+        var arr = await resp.json();
+        if (Array.isArray(arr)) arr.forEach(function (item, idx) {
+          var camp = chunk[idx], ads = [];
+          try { var b = JSON.parse(item.body); ads = b.data || []; } catch (e) {}
+          ads.forEach(function (ad) {
+            var st = (ad.effective_status || '').toUpperCase();
+            if (st !== 'DISAPPROVED' && st !== 'WITH_ISSUES') return;
+            var reason = '';
+            if (Array.isArray(ad.issues_info) && ad.issues_info.length) {
+              var ii = ad.issues_info[0];
+              reason = ii.error_summary || ii.error_message || '';
+            }
+            out.push({ campId: camp.id, campName: camp.name || camp.id, adId: ad.id, adName: ad.name || ad.id, status: st, reason: reason });
+          });
+        });
+      } catch (e) {}
+    }
+  }
+  return out;
+}
+
 /* ---------- execução principal ---------- */
 async function run(env, opts) {
   var forceSched = (opts && opts.forceSched) || null; /* /run?sched=HHMM: dispara o reset daquele slot AGORA (teste) */
@@ -1168,6 +1207,28 @@ async function run(env, opts) {
         await sendTelegram(env, '\u{1F6AB} CONTA BLOQUEADA — ' + linesB.length + ' conta(s) que estava(m) gastando:\n\n' + showB.join('\n\n'));
       }
       if (bDirty) { try { await env.RULES_KV.put('blockedNotified', JSON.stringify(bNotif)); } catch (e) {} }
+
+      /* ── ANÚNCIO REJEITADO/DESATIVADO pela Meta: avisa no Telegram com CAMPANHA + ANÚNCIO + MOTIVO.
+         1x por rejeição (dedup por adId no KV 'adRejNotified' = { adId: status }). O map salvo é só o
+         estado ATUAL — anúncio que recuperar sai do map e, se for rejeitado de novo depois, avisa outra
+         vez. Se mudar de WITH_ISSUES p/ DISAPPROVED (status diferente), avisa de novo. ── */
+      var rejList = await checkAdRejections(env, camps.concat(DAILY_CAMPS));
+      DIAG.adRej = rejList.length;
+      var rNotif = {}; try { var rs = await env.RULES_KV.get('adRejNotified'); if (rs) { var rj = JSON.parse(rs); if (rj && typeof rj === 'object') rNotif = rj; } } catch (e) {}
+      var curRej = {}, linesRej = [];
+      for (var rji = 0; rji < rejList.length; rji++) {
+        var rd = rejList[rji];
+        curRej[rd.adId] = rd.status;
+        if (rNotif[rd.adId] === rd.status) continue; /* ja avisado nesse mesmo status */
+        var stTxt = rd.status === 'DISAPPROVED' ? 'REJEITADO' : 'com problema (WITH_ISSUES)';
+        linesRej.push('• Campanha: ' + rd.campName + '\n   Anúncio: ' + rd.adName + '\n   Status: ' + stTxt + '\n   Motivo: ' + (rd.reason || '(não informado pela Meta)'));
+      }
+      if (linesRej.length) {
+        var showRej = linesRej.slice(0, 20);
+        if (linesRej.length > 20) showRej.push('…e mais ' + (linesRej.length - 20) + ' anúncio(s).');
+        await sendTelegram(env, '\u{1F6D1} Anúncio(s) REJEITADO/DESATIVADO pela Meta — ' + linesRej.length + ' novo(s):\n\n' + showRej.join('\n\n'));
+      }
+      try { await env.RULES_KV.put('adRejNotified', JSON.stringify(curRej)); } catch (e) {}
     } catch (e) { DIAG.tgErr = String((e && e.message) || e); }
   }
   DIAG.blocked = BLOCKED.length; /* visivel no /run */
