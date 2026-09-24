@@ -1041,11 +1041,8 @@ async function run(env, opts) {
   var capReset = null; try { capReset = await env.RULES_KV.get('capResetDay'); } catch (e) {}
   if (capReset !== today) {
     var toClear = camps.filter(function (c) { return c._hasCap; });
-    DIAG.capReset = { day: today, limitadas: toClear.length, mode: applyMode };
-    if ((applyMode) === 'live') {
-      if (toClear.length) { DIAG.capReset.conjuntosLiberados = await removeCapsForNewDay(toClear); }
-      try { await env.RULES_KV.put('capResetDay', today); } catch (e) {}
-    }
+    DIAG.capReset = { day: today, limitadas: toClear.length, mode: applyMode, disabled: true };
+    /* DESLIGADO (regras antigas só alertam; e o cap da MADRUGADA você remove MANUAL — o robô não pode remover). */
   }
   var actions = [];
   var pausedList = []; /* campanhas pausadas neste ciclo (p/ alerta Telegram) */
@@ -1072,8 +1069,9 @@ async function run(env, opts) {
     /* CP_VALD: robo NAO aplica nada — so junta p/ o DIGEST 1x/dia (so as ATIVAS). */
     if (r.key === 'VALD') { if ((c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') valdList.push({ id: c.id, name: c.name, spend: Math.round(r.spend), sales: r.sales, roas: +r.roas.toFixed(2) }); continue; }
 
-    /* DRY: avisa o que CORTARIA. Em LIVE a lista so recebe quando aplica de verdade (evita repetir todo ciclo). */
-    if (r.key === 'CORTAR' && (applyMode) !== 'live' && !_jaAplicada) cortadaList.push({ id: c.id, name: c.name, action: r.action });
+    /* REGRAS ANTIGAS = SÓ ALERTA (robô NUNCA aplica sozinho). CORTAR e RESTAURAR viram só aviso no Telegram. */
+    if (r.key === 'CORTAR' && !_jaAplicada) cortadaList.push({ id: c.id, name: c.name, action: r.action });
+    if (r.key === 'RESTAURAR' && !_jaAplicada) restList.push({ id: c.id, name: c.name, action: r.action });
 
     /* ── PAUSAR: o robo NAO pausa mais (01/08 — usuario pausa manualmente pelo dashboard). SO avisa no Telegram
        (pausedList) que a campanha entrou na faixa de PAUSAR; nenhuma acao e aplicada. ── */
@@ -1082,7 +1080,7 @@ async function run(env, opts) {
     } else if (r.key === 'REMLIMITE_AUTO') {
       /* ── RECUPEROU (ROAS>remLimRoas, janela remLimStart..remLimEnd): robo REMOVE o limite sozinho. ── */
       if (!_jaAplicada) unlimitedList.push({ id: c.id, name: c.name, roas: +r.roas.toFixed(2) });
-      if ((applyMode) === 'live' && (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') {
+      if (false && (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') { /* REGRA ANTIGA: só alerta, nunca aplica */
         try {
           await removeCapsForNewDay([c]); /* seta cap = orcamento da campanha (= sem limite) e marca _hasCap=false */
           appliedMap[c.id] = { sig: 'REMLIMITE_AUTO', action: r.action, t: Date.now(), day: today };
@@ -1096,7 +1094,7 @@ async function run(env, opts) {
       /* ── LIMITAR GASTO (soft-stop): aplica lifetime_spend_cap nos conjuntos (live, campanha ativa,
          respeitando cooldown). NAO pausa. REMLIMITE fica de fora (remocao SO manual / virada). ── */
       limitedList.push({ id: c.id, name: c.name, action: r.action });
-      if ((applyMode) === 'live' && (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') {
+      if (false && (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE') { /* REGRA ANTIGA: só alerta, nunca aplica */
         var prevL = appliedMap[c.id];
         var sameL = prevL && prevL.day === today && prevL.sig === r.key; /* nao repete a MESMA acao no mesmo dia */
         var ckL = 'cd:' + c.id, lastL = 0;
@@ -1114,7 +1112,7 @@ async function run(env, opts) {
           }
         }
       }
-    } else if ((applyMode) === 'live' && r.newEnd && r.key && r.key !== 'AUMENTAR') {
+    } else if (false && r.newEnd && r.key && r.key !== 'AUMENTAR') { /* REGRA ANTIGA (CORTAR/RESTAURAR): só alerta, NUNCA aplica */
       /* AUMENTAR fica de FORA do auto-apply (usuario faz manual pelo dashboard). O robo so sugere. */
       var prev = appliedMap[c.id];
       var sameAsLast = prev && prev.day === today && prev.sig === r.key; // a ULTIMA aplicada hoje ja foi essa mesma regra -> nao repete (mas reaplica se mudou e voltou)
@@ -1176,7 +1174,7 @@ async function run(env, opts) {
       var sent = {}; try { var ss = await env.RULES_KV.get('tgSent'); if (ss) { var sj = JSON.parse(ss); if (sj && typeof sj === 'object') sent = sj; } } catch (e) {}
       var newSent = {}; Object.keys(sent).forEach(function (k) { if (typeof sent[k] === 'number' && (nowT - sent[k]) < 26 * 3600000) newSent[k] = sent[k]; });
       var canSend = function (k) { return !newSent[k] || (nowT - newSent[k]) >= repMs; };
-      var liveMode = (applyMode) === 'live';
+      var liveMode = false; /* REGRAS ANTIGAS = SÓ ALERTA: o robô nunca aplica (só a madrugada aplica). */
       var lines = [];
       for (var pi = 0; pi < pausedList.length; pi++) {
         var pp = pausedList[pi];
