@@ -920,13 +920,13 @@ async function batchPostW(tk, batchArr) {
     try { await fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() }); } catch (e) {}
   }
 }
-/* ── LIMITE DE MADRUGADA (dayparting de GASTO, automatico) ──
-   Config no KV `madrugada` = { campId: { v:30, en:true, name } } (vem do dashboard via POST /madrugada).
-   Janela BR: R_MADSTART(0) .. R_MADEND(7). 1a rodada DENTRO da janela (00:00-07:00): seta lifetime_spend_cap
-   por CONJUNTO ativo = gasto_do_conjunto + (v / nº conjuntos ativos) -> a soma dos tetos = gasto_campanha + v,
-   entao a campanha gasta NO MAXIMO $v na madrugada e para. 1a rodada DEPOIS da janela (>=07:00): remove o teto
-   (sobe p/ o orcamento) -> volta a rodar full. Guards por dia (madCapDay/madRemDay): aplica 1x e remove 1x/dia.
-   So aplica de verdade em applyMode 'live'. Vale p/ CBO total E diario (allCamps = camps + DAILY_CAMPS). */
+/* ── LIMITE DE MADRUGADA (dayparting de GASTO, automatico) — SO LIMITA, NAO REMOVE ──
+   O robo SO APLICA o teto (1x na 1a rodada da janela). NAO remove de manha — o usuario remove MANUAL no dash.
+   Janela BR: R_MADSTART(0) .. R_MADEND(7). Dentro da janela seta lifetime_spend_cap por CONJUNTO ativo =
+   gasto_do_conjunto + (v / nº conjuntos ativos) -> a soma dos tetos = gasto_campanha + v, entao a campanha
+   gasta NO MAXIMO $v na madrugada e para. Guard por dia (madCapDay): aplica 1x/dia. So em applyMode 'live'.
+   Vale p/ CBO total E diario (allCamps = camps + DAILY_CAMPS). Config: madGlobal {v,en} (todas) + madrugada
+   {campId:{v,en}} (excecoes: en:false EXCLUI; v>0 valor proprio). Vem do dashboard via POST /madrugada. */
 async function runMadrugada(env, allCamps, applyMode) {
   /* GLOBAL (KV madGlobal {v,en}) = vale p/ TODAS as campanhas ativas. OVERRIDES (KV madrugada {campId:{v,en}}):
      en:false EXCLUI a campanha; v>0 usa esse valor no lugar do global. */
@@ -936,7 +936,8 @@ async function runMadrugada(env, allCamps, applyMode) {
   var startH = parseInt(env.R_MADSTART); if (isNaN(startH)) startH = 0;
   var endH = parseInt(env.R_MADEND); if (isNaN(endH)) endH = 7;
   var h = brHour(), today = brDatePlus(0);
-  var inWindow = (h >= startH && h < endH), afterWindow = (h >= endH);
+  var inWindow = (h >= startH && h < endH);
+  if (!inWindow) return { configured: 0, global: globalOn ? globalV : 0, brHour: h, window: [startH, endH], note: 'fora da janela' };
   var isActive = function (c) { return (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE'; };
   /* Lista de alvos = campanhas ATIVAS com valor efetivo (override ou global). */
   var targetsList = [];
@@ -949,47 +950,32 @@ async function runMadrugada(env, allCamps, applyMode) {
   });
   if (!targetsList.length) return { configured: 0, global: globalOn ? globalV : 0 };
   var capDay = {}; try { var cdv = await env.RULES_KV.get('madCapDay'); if (cdv) capDay = JSON.parse(cdv) || {}; } catch (e) {}
-  var remDay = {}; try { var rdv = await env.RULES_KV.get('madRemDay'); if (rdv) remDay = JSON.parse(rdv) || {}; } catch (e) {}
-  var capDirty = false, remDirty = false, applied = [], removed = [];
+  var capDirty = false, applied = [];
   var MAXOPS = 18, ops = 0; /* teto de operacoes por ciclo (subrequests do Cloudflare); o resto continua no proximo ciclo (guard por campanha) */
+  /* O robo SO LIMITA (aplica o teto 1x na 1a rodada da janela). NAO REMOVE — o usuario remove MANUAL no dash. */
   for (var i = 0; i < targetsList.length; i++) {
     if (ops >= MAXOPS) break;
     var camp = targetsList[i].c, id = camp.id, X = targetsList[i].v, tk = camp._tk;
-    if (inWindow && capDay[id] !== today) {
-      ops++;
-      var sets = await fjPaged(API + '/' + id + '/adsets?fields=id,effective_status,insights.date_preset(maximum){spend}&limit=200&access_token=' + tk);
-      var act = (sets || []).filter(function (s) { return (s.effective_status || '').toUpperCase() === 'ACTIVE'; });
-      if (!act.length) continue;
-      var share = X / act.length;
-      var batch = act.map(function (s) {
-        var sp = (s.insights && s.insights.data && s.insights.data[0]) ? (parseFloat(s.insights.data[0].spend) || 0) : 0;
-        return { method: 'POST', relative_url: String(s.id), body: 'lifetime_spend_cap=' + Math.max(1, Math.round((sp + share) * 100)) };
-      });
-      if (applyMode === 'live') { await batchPostW(tk, batch); capDay[id] = today; capDirty = true; }
-      applied.push({ id: id, name: camp.name, v: X, sets: act.length });
-    } else if (afterWindow && remDay[id] !== today) {
-      ops++;
-      var lbCents = parseInt(camp.lifetime_budget) || 100000000;
-      var sets2 = await fjPaged(API + '/' + id + '/adsets?fields=id,effective_status,lifetime_spend_cap&limit=200&access_token=' + tk);
-      var act2 = (sets2 || []).filter(function (s) { return (s.effective_status || '').toUpperCase() === 'ACTIVE' && s.lifetime_spend_cap != null && +s.lifetime_spend_cap > 0 && +s.lifetime_spend_cap < lbCents; });
-      if (act2.length && applyMode === 'live') {
-        var batch2 = act2.map(function (s) { return { method: 'POST', relative_url: String(s.id), body: 'lifetime_spend_cap=' + lbCents }; });
-        await batchPostW(tk, batch2);
-      }
-      if (applyMode === 'live') { remDay[id] = today; remDirty = true; }
-      removed.push({ id: id, name: camp.name, sets: act2.length });
-    }
+    if (capDay[id] === today) continue; /* ja limitou hoje */
+    ops++;
+    var sets = await fjPaged(API + '/' + id + '/adsets?fields=id,effective_status,insights.date_preset(maximum){spend}&limit=200&access_token=' + tk);
+    var act = (sets || []).filter(function (s) { return (s.effective_status || '').toUpperCase() === 'ACTIVE'; });
+    if (!act.length) continue;
+    var share = X / act.length;
+    var batch = act.map(function (s) {
+      var sp = (s.insights && s.insights.data && s.insights.data[0]) ? (parseFloat(s.insights.data[0].spend) || 0) : 0;
+      return { method: 'POST', relative_url: String(s.id), body: 'lifetime_spend_cap=' + Math.max(1, Math.round((sp + share) * 100)) };
+    });
+    if (applyMode === 'live') { await batchPostW(tk, batch); capDay[id] = today; capDirty = true; }
+    applied.push({ id: id, name: camp.name, v: X, sets: act.length });
   }
   if (capDirty) { try { await env.RULES_KV.put('madCapDay', JSON.stringify(capDay)); } catch (e) {} }
-  if (remDirty) { try { await env.RULES_KV.put('madRemDay', JSON.stringify(remDay)); } catch (e) {} }
-  if ((applied.length || removed.length) && env.TG_TOKEN && env.TG_CHAT) {
-    var msg = '';
-    if (applied.length) msg += '\u{1F319} MADRUGADA — limitei ' + applied.length + ' campanha(s) (roda até o máx e para):\n' + applied.map(function (a) { return '• ' + a.name + ' — máx $' + a.v; }).join('\n');
-    if (removed.length) msg += (msg ? '\n\n' : '') + '☀️ Madrugada acabou — removi o limite de ' + removed.length + ' campanha(s) (voltam a rodar full):\n' + removed.map(function (a) { return '• ' + a.name; }).join('\n');
+  if (applied.length && env.TG_TOKEN && env.TG_CHAT) {
+    var msg = '\u{1F319} MADRUGADA — limitei ' + applied.length + ' campanha(s) (roda até o máx e para; você remove de manhã no dash):\n' + applied.map(function (a) { return '• ' + a.name + ' — máx $' + a.v; }).join('\n');
     if (applyMode !== 'live') msg += '\n\n(dry — não apliquei de verdade)';
     try { await sendTelegram(env, msg); } catch (e) {}
   }
-  return { configured: targetsList.length, global: globalOn ? globalV : 0, applied: applied.length, removed: removed.length, brHour: h, window: [startH, endH], mode: applyMode };
+  return { configured: targetsList.length, global: globalOn ? globalV : 0, applied: applied.length, brHour: h, window: [startH, endH], mode: applyMode };
 }
 async function run(env, opts) {
   var forceSched = (opts && opts.forceSched) || null; /* /run?sched=HHMM: dispara o reset daquele slot AGORA (teste) */
