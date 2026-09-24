@@ -970,12 +970,18 @@ async function runMadrugada(env, allCamps, applyMode) {
     applied.push({ id: id, name: camp.name, v: X, sets: act.length });
   }
   if (capDirty) { try { await env.RULES_KV.put('madCapDay', JSON.stringify(capDay)); } catch (e) {} }
-  if (applied.length && env.TG_TOKEN && env.TG_CHAT) {
-    var msg = '\u{1F319} MADRUGADA — limitei ' + applied.length + ' campanha(s) (roda até o máx e para; você remove de manhã no dash):\n' + applied.map(function (a) { return '• ' + a.name + ' — máx $' + a.v; }).join('\n');
-    if (applyMode !== 'live') msg += '\n\n(dry — não apliquei de verdade)';
-    try { await sendTelegram(env, msg); } catch (e) {}
+  /* AVISO Telegram: 1x GLOBAL por dia (não por campanha, não repete mesmo aplicando em vários ciclos).
+     Guard KV `madNotifyDay`. Só quando aplicou DE VERDADE (live). Confirma o VALOR limitado no dia. */
+  var notified = false;
+  if (applied.length && applyMode === 'live' && env.TG_TOKEN && env.TG_CHAT) {
+    var notifDay = null; try { notifDay = await env.RULES_KV.get('madNotifyDay'); } catch (e) {}
+    if (notifDay !== today) {
+      var valTxt = globalOn ? ('$' + Math.round(globalV)) : 'o valor configurado';
+      try { await sendTelegram(env, '\u{1F319} Limite de madrugada aplicado hoje — máx ' + valTxt + ' por campanha. Remova de manhã no dash quando quiser.'); notified = true; } catch (e) {}
+      try { await env.RULES_KV.put('madNotifyDay', today); } catch (e) {}
+    }
   }
-  return { configured: targetsList.length, global: globalOn ? globalV : 0, applied: applied.length, brHour: h, window: [startH, endH], mode: applyMode };
+  return { configured: targetsList.length, global: globalOn ? globalV : 0, applied: applied.length, notified: notified, brHour: h, window: [startH, endH], mode: applyMode };
 }
 async function run(env, opts) {
   var forceSched = (opts && opts.forceSched) || null; /* /run?sched=HHMM: dispara o reset daquele slot AGORA (teste) */
