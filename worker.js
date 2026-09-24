@@ -833,16 +833,60 @@ async function runBudgetSchedule(env, camps, dailyCamps, applyMode, tokens, forc
   return { due: due, slotKey: slotKey, applied: applied, forced: forced };
 }
 
+/* Reduz um texto (motivo da Meta, que costuma ser um parágrafo) a UMA frase curta p/ o Telegram:
+   colapsa espaços, pega a 1a frase (até . ! ?) e corta em ~140 chars. */
+function firstSentence(txt) {
+  if (!txt) return '';
+  var s = String(txt).replace(/\s+/g, ' ').trim();
+  var m = s.match(/^(.*?[.!?])(\s|$)/);
+  if (m && m[1]) s = m[1];
+  if (s.length > 140) s = s.slice(0, 137).replace(/\s+\S*$/, '') + '…';
+  return s.trim();
+}
+/* Extrai o MOTIVO da rejeição de um anúncio. A rejeição por POLÍTICA (ex.: uso de figura pública)
+   NÃO vem em issues_info — vem em ad_review_feedback.global/placement_specific (o mesmo texto que
+   aparece no Gerenciador). Ordem: issues_info.error_summary (curto) -> mensagem do ad_review_feedback
+   -> error_message. Sempre reduzido a 1 frase curta. */
+function adRejectReason(ad) {
+  var reason = '';
+  if (Array.isArray(ad.issues_info) && ad.issues_info.length) {
+    var ii = ad.issues_info[0];
+    reason = ii.error_summary || '';
+    if (!reason) reason = ii.error_message || '';
+  }
+  if (!reason && ad.ad_review_feedback && typeof ad.ad_review_feedback === 'object') {
+    var fb = ad.ad_review_feedback;
+    /* global = { <categoria ou id>: "mensagem" } */
+    var g = fb.global;
+    if (g && typeof g === 'object') {
+      var gk = Object.keys(g);
+      if (gk.length) reason = (typeof g[gk[0]] === 'string' && g[gk[0]]) ? g[gk[0]] : gk[0];
+    }
+    /* placement_specific = { <placement>: { <categoria>: "mensagem" } } */
+    if (!reason && fb.placement_specific && typeof fb.placement_specific === 'object') {
+      var ps = fb.placement_specific, pk = Object.keys(ps);
+      for (var pi = 0; pi < pk.length && !reason; pi++) {
+        var inner = ps[pk[pi]];
+        if (inner && typeof inner === 'object') {
+          var ik = Object.keys(inner);
+          if (ik.length) reason = (typeof inner[ik[0]] === 'string' && inner[ik[0]]) ? inner[ik[0]] : ik[0];
+        }
+      }
+    }
+  }
+  if (!reason && Array.isArray(ad.issues_info) && ad.issues_info.length) reason = ad.issues_info[0].error_message || '';
+  return firstSentence(reason);
+}
 /* ── ANÚNCIOS REJEITADOS/DESATIVADOS pela Meta: varre os anúncios das campanhas coletadas (as mesmas
    que aparecem no dash) e devolve os que estão DISAPPROVED (rejeitado) ou WITH_ISSUES, com o MOTIVO
-   (issues_info.error_summary/message), nome da CAMPANHA e nome do ANÚNCIO. Filtra por effective_status
+   (issues_info + ad_review_feedback), nome da CAMPANHA e nome do ANÚNCIO. Filtra por effective_status
    na própria edge /ads (só puxa os rejeitados = leve) e roda em LOTE por token (50 campanhas/chamada,
    Batch API) p/ não estourar rate limit. */
 async function checkAdRejections(env, allCamps) {
   var out = [];
   var byTk = {};
   allCamps.forEach(function (c) { if (c && c.id && c._tk) (byTk[c._tk] = byTk[c._tk] || []).push(c); });
-  var rel = 'ads?fields=name,effective_status,issues_info&effective_status=' + encodeURIComponent('["DISAPPROVED","WITH_ISSUES"]') + '&limit=100';
+  var rel = 'ads?fields=name,effective_status,issues_info,ad_review_feedback&effective_status=' + encodeURIComponent('["DISAPPROVED","WITH_ISSUES"]') + '&limit=100';
   for (var tk in byTk) {
     var list = byTk[tk];
     for (var i = 0; i < list.length; i += 50) {
@@ -858,12 +902,7 @@ async function checkAdRejections(env, allCamps) {
           ads.forEach(function (ad) {
             var st = (ad.effective_status || '').toUpperCase();
             if (st !== 'DISAPPROVED' && st !== 'WITH_ISSUES') return;
-            var reason = '';
-            if (Array.isArray(ad.issues_info) && ad.issues_info.length) {
-              var ii = ad.issues_info[0];
-              reason = ii.error_summary || ii.error_message || '';
-            }
-            out.push({ campId: camp.id, campName: camp.name || camp.id, adId: ad.id, adName: ad.name || ad.id, status: st, reason: reason });
+            out.push({ campId: camp.id, campName: camp.name || camp.id, adId: ad.id, adName: ad.name || ad.id, status: st, reason: adRejectReason(ad) });
           });
         });
       } catch (e) {}
@@ -873,6 +912,85 @@ async function checkAdRejections(env, allCamps) {
 }
 
 /* ---------- execução principal ---------- */
+/* POST em LOTE (Batch API) — sub-requests ja prontos (relative_url + body). Lotes de 50. */
+async function batchPostW(tk, batchArr) {
+  for (var i = 0; i < batchArr.length; i += 50) {
+    var chunk = batchArr.slice(i, i + 50);
+    var body = new URLSearchParams(); body.append('batch', JSON.stringify(chunk)); body.append('access_token', tk);
+    try { await fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() }); } catch (e) {}
+  }
+}
+/* ── LIMITE DE MADRUGADA (dayparting de GASTO, automatico) ──
+   Config no KV `madrugada` = { campId: { v:30, en:true, name } } (vem do dashboard via POST /madrugada).
+   Janela BR: R_MADSTART(0) .. R_MADEND(7). 1a rodada DENTRO da janela (00:00-07:00): seta lifetime_spend_cap
+   por CONJUNTO ativo = gasto_do_conjunto + (v / nº conjuntos ativos) -> a soma dos tetos = gasto_campanha + v,
+   entao a campanha gasta NO MAXIMO $v na madrugada e para. 1a rodada DEPOIS da janela (>=07:00): remove o teto
+   (sobe p/ o orcamento) -> volta a rodar full. Guards por dia (madCapDay/madRemDay): aplica 1x e remove 1x/dia.
+   So aplica de verdade em applyMode 'live'. Vale p/ CBO total E diario (allCamps = camps + DAILY_CAMPS). */
+async function runMadrugada(env, allCamps, applyMode) {
+  /* GLOBAL (KV madGlobal {v,en}) = vale p/ TODAS as campanhas ativas. OVERRIDES (KV madrugada {campId:{v,en}}):
+     en:false EXCLUI a campanha; v>0 usa esse valor no lugar do global. */
+  var glob = {}; try { var gs = await env.RULES_KV.get('madGlobal'); if (gs) glob = JSON.parse(gs) || {}; } catch (e) {}
+  var over = {}; try { var os = await env.RULES_KV.get('madrugada'); if (os) over = JSON.parse(os) || {}; } catch (e) {}
+  var globalOn = !!(glob && glob.en && parseFloat(glob.v) > 0), globalV = parseFloat(glob.v) || 0;
+  var startH = parseInt(env.R_MADSTART); if (isNaN(startH)) startH = 0;
+  var endH = parseInt(env.R_MADEND); if (isNaN(endH)) endH = 7;
+  var h = brHour(), today = brDatePlus(0);
+  var inWindow = (h >= startH && h < endH), afterWindow = (h >= endH);
+  var isActive = function (c) { return (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE'; };
+  /* Lista de alvos = campanhas ATIVAS com valor efetivo (override ou global). */
+  var targetsList = [];
+  (allCamps || []).forEach(function (c) {
+    if (!c || !c._tk || !isActive(c)) return;
+    var ov = over[c.id], v = 0;
+    if (ov) { if (ov.en === false) return; v = parseFloat(ov.v) || 0; }
+    if (!(v > 0) && globalOn) v = globalV;
+    if (v > 0) targetsList.push({ c: c, v: v });
+  });
+  if (!targetsList.length) return { configured: 0, global: globalOn ? globalV : 0 };
+  var capDay = {}; try { var cdv = await env.RULES_KV.get('madCapDay'); if (cdv) capDay = JSON.parse(cdv) || {}; } catch (e) {}
+  var remDay = {}; try { var rdv = await env.RULES_KV.get('madRemDay'); if (rdv) remDay = JSON.parse(rdv) || {}; } catch (e) {}
+  var capDirty = false, remDirty = false, applied = [], removed = [];
+  var MAXOPS = 18, ops = 0; /* teto de operacoes por ciclo (subrequests do Cloudflare); o resto continua no proximo ciclo (guard por campanha) */
+  for (var i = 0; i < targetsList.length; i++) {
+    if (ops >= MAXOPS) break;
+    var camp = targetsList[i].c, id = camp.id, X = targetsList[i].v, tk = camp._tk;
+    if (inWindow && capDay[id] !== today) {
+      ops++;
+      var sets = await fjPaged(API + '/' + id + '/adsets?fields=id,effective_status,insights.date_preset(maximum){spend}&limit=200&access_token=' + tk);
+      var act = (sets || []).filter(function (s) { return (s.effective_status || '').toUpperCase() === 'ACTIVE'; });
+      if (!act.length) continue;
+      var share = X / act.length;
+      var batch = act.map(function (s) {
+        var sp = (s.insights && s.insights.data && s.insights.data[0]) ? (parseFloat(s.insights.data[0].spend) || 0) : 0;
+        return { method: 'POST', relative_url: String(s.id), body: 'lifetime_spend_cap=' + Math.max(1, Math.round((sp + share) * 100)) };
+      });
+      if (applyMode === 'live') { await batchPostW(tk, batch); capDay[id] = today; capDirty = true; }
+      applied.push({ id: id, name: camp.name, v: X, sets: act.length });
+    } else if (afterWindow && remDay[id] !== today) {
+      ops++;
+      var lbCents = parseInt(camp.lifetime_budget) || 100000000;
+      var sets2 = await fjPaged(API + '/' + id + '/adsets?fields=id,effective_status,lifetime_spend_cap&limit=200&access_token=' + tk);
+      var act2 = (sets2 || []).filter(function (s) { return (s.effective_status || '').toUpperCase() === 'ACTIVE' && s.lifetime_spend_cap != null && +s.lifetime_spend_cap > 0 && +s.lifetime_spend_cap < lbCents; });
+      if (act2.length && applyMode === 'live') {
+        var batch2 = act2.map(function (s) { return { method: 'POST', relative_url: String(s.id), body: 'lifetime_spend_cap=' + lbCents }; });
+        await batchPostW(tk, batch2);
+      }
+      if (applyMode === 'live') { remDay[id] = today; remDirty = true; }
+      removed.push({ id: id, name: camp.name, sets: act2.length });
+    }
+  }
+  if (capDirty) { try { await env.RULES_KV.put('madCapDay', JSON.stringify(capDay)); } catch (e) {} }
+  if (remDirty) { try { await env.RULES_KV.put('madRemDay', JSON.stringify(remDay)); } catch (e) {} }
+  if ((applied.length || removed.length) && env.TG_TOKEN && env.TG_CHAT) {
+    var msg = '';
+    if (applied.length) msg += '\u{1F319} MADRUGADA — limitei ' + applied.length + ' campanha(s) (roda até o máx e para):\n' + applied.map(function (a) { return '• ' + a.name + ' — máx $' + a.v; }).join('\n');
+    if (removed.length) msg += (msg ? '\n\n' : '') + '☀️ Madrugada acabou — removi o limite de ' + removed.length + ' campanha(s) (voltam a rodar full):\n' + removed.map(function (a) { return '• ' + a.name; }).join('\n');
+    if (applyMode !== 'live') msg += '\n\n(dry — não apliquei de verdade)';
+    try { await sendTelegram(env, msg); } catch (e) {}
+  }
+  return { configured: targetsList.length, global: globalOn ? globalV : 0, applied: applied.length, removed: removed.length, brHour: h, window: [startH, endH], mode: applyMode };
+}
 async function run(env, opts) {
   var forceSched = (opts && opts.forceSched) || null; /* /run?sched=HHMM: dispara o reset daquele slot AGORA (teste) */
   RULES = buildRules(env); // aplica os parametros das variaveis do Cloudflare (ou os padroes)
@@ -1241,6 +1359,8 @@ async function run(env, opts) {
       }
     } catch (e) { DIAG.tgErr = String((e && e.message) || e); }
   }
+  /* LIMITE DE MADRUGADA: aplica o teto na janela (00:00-07:00 BR) e remove depois — automatico, 1x/dia. */
+  try { DIAG.mad = await runMadrugada(env, camps.concat(DAILY_CAMPS), applyMode); } catch (e) { DIAG.madErr = String((e && e.message) || e); }
   DIAG.blocked = BLOCKED.length; /* visivel no /run */
 
   var log = { at: new Date().toISOString(), mode: applyMode, mood: moodObj.mood, moodRoas: +moodObj.roas.toFixed(2), count: camps.length, diag: DIAG, actions: actions };
@@ -1283,6 +1403,33 @@ export default {
       }
       var m = {}; try { var s2 = await env.RULES_KV.get('applied'); if (s2) m = JSON.parse(s2); } catch (e) {}
       return jsonResp(m);
+    }
+
+    /* CONFIG do LIMITE DE MADRUGADA. GLOBAL (KV madGlobal {v,en}) = vale p/ TODAS as campanhas ativas.
+       OVERRIDES por campanha (KV madrugada {campId:{v,en,name}}): en:false EXCLUI a campanha (o "remover"
+       do dash); v>0 usa esse valor no lugar do global. GET devolve {global, camps}. POST:
+       {global:true, v, en} -> seta o global; {id, v, en, name} -> override; {id, remove:true} -> apaga override. */
+    if (path === '/madrugada') {
+      var mm = {}; try { var ms = await env.RULES_KV.get('madrugada'); if (ms) mm = JSON.parse(ms) || {}; } catch (e) {}
+      var gg = {}; try { var gs2 = await env.RULES_KV.get('madGlobal'); if (gs2) gg = JSON.parse(gs2) || {}; } catch (e) {}
+      if (request.method === 'POST') {
+        var mb = {}; try { mb = await request.json(); } catch (e) {}
+        if (mb && mb.global) {
+          var gv = parseFloat(mb.v) || 0;
+          gg = { v: gv, en: (mb.en !== false && gv > 0) };
+          try { await env.RULES_KV.put('madGlobal', JSON.stringify(gg)); } catch (e) {}
+        } else if (mb && mb.id) {
+          if (mb.remove) { delete mm[mb.id]; }
+          else {
+            var vv = parseFloat(mb.v) || 0;
+            /* en:false (sem v) = EXCLUIR a campanha do global; v>0 = valor proprio. */
+            mm[mb.id] = { v: vv, en: (mb.en !== false && vv > 0), name: mb.name || (mm[mb.id] && mm[mb.id].name) || '' };
+          }
+          try { await env.RULES_KV.put('madrugada', JSON.stringify(mm)); } catch (e) {}
+        }
+        return jsonResp({ ok: true, global: gg, camps: mm });
+      }
+      return jsonResp({ global: gg, camps: mm });
     }
 
     /* Historico append-only COMPARTILHADO (lista RICA acumulada). Tem entradas do robo
