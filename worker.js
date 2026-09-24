@@ -243,7 +243,7 @@ function suggestRule(c, mood) {
      limRoas(1,4) <= ROAS < pauseRoas(1,5) -> PAUSAR (esperar o REBOTE da atribuicao 1h08; run() avisa p/ reativar antes de 1h). */
   if (sales < RULES.aumMaxSales && sp > RULES.limMinSpend) {
     if (roas < RULES.limRoas) return { action: 'REDUZIR RITMO (+' + RULES.cutDays + 'd — ROAS ' + roas.toFixed(2) + ' < ' + RULES.limRoas + ', ' + sales + ' venda)', key: 'CORTAR', target: cortarTarget, newEnd: cortarEnd, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
-    if (roas < RULES.pauseRoas) return { action: 'PAUSAR — esperar rebote (ROAS ' + roas.toFixed(2) + ' < ' + RULES.pauseRoas + ', ' + sales + ' venda)', key: 'PAUSAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
+    if (roas < RULES.pauseRoas) return { action: 'ROAS baixo — ACOMPANHAR (ROAS ' + roas.toFixed(2) + ' < ' + RULES.pauseRoas + ', ' + sales + ' venda). Avalie limitar no dash — o robô NÃO pausa.', key: 'PAUSAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   }
   /* CAMPEA: >= aumMaxSales(5) vendas -> NUNCA corta (gestao manual, robo nao freia). Escala se ROAS alto. */
   if (sales > RULES.aumMaxSales) return { action: 'MANTER (>' + RULES.aumMaxSales + ' vendas, ROAS ' + roas.toFixed(2) + ' — gestao manual)', key: 'MANTER', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
@@ -1175,16 +1175,17 @@ async function run(env, opts) {
       var newSent = {}; Object.keys(sent).forEach(function (k) { if (typeof sent[k] === 'number' && (nowT - sent[k]) < 26 * 3600000) newSent[k] = sent[k]; });
       var canSend = function (k) { return !newSent[k] || (nowT - newSent[k]) >= repMs; };
       var liveMode = false; /* REGRAS ANTIGAS = SÓ ALERTA: o robô nunca aplica (só a madrugada aplica). */
+      /* AVISO "ROAS baixo — ACOMPANHAR" (24/09): a gente NÃO pausa mais; só avisa p/ acompanhar/limitar. */
       var lines = [];
       for (var pi = 0; pi < pausedList.length; pi++) {
         var pp = pausedList[pi];
-        var pk = pp.id + ':pause';
+        var pk = pp.id + ':watch';
         if (canSend(pk)) { lines.push('• ' + pp.name + '\n   ' + pp.action); newSent[pk] = nowT; }
       }
       if (lines.length) {
         var show = lines.slice(0, 25);
         if (lines.length > 25) show.push('…e mais ' + (lines.length - 25) + ' campanha(s).');
-        await sendTelegram(env, '\u{1F7E1} Faixa de PAUSAR (robô NÃO pausa — pause no dash se quiser) — ' + lines.length + ' campanha(s):\n\n' + show.join('\n\n'));
+        await sendTelegram(env, '\u{1F440} ROAS baixo — ACOMPANHAR (o robô NÃO pausa; limite no dash se quiser) — ' + lines.length + ' campanha(s):\n\n' + show.join('\n\n'));
       }
       /* LIMITE DE GASTO (soft-stop sem venda). */
       var linesL = [];
@@ -1248,19 +1249,8 @@ async function run(env, opts) {
           try { await env.RULES_KV.put('valdDay', today); } catch (e) {}
         }
       }
-      /* LIMITE REMOVIDO pelo robo (recuperou ROAS>1,5 na janela). */
-      var linesU = [];
-      for (var ui = 0; ui < unlimitedList.length; ui++) {
-        var uu = unlimitedList[ui];
-        var uk = uu.id + ':unlim';
-        if (canSend(uk)) { linesU.push('• ' + uu.name + '\n   recuperou · ROAS ' + uu.roas.toFixed(2) + ' — limite REMOVIDO, voltou a rodar'); newSent[uk] = nowT; }
-      }
-      if (linesU.length) {
-        var showU = linesU.slice(0, 25);
-        if (linesU.length > 25) showU.push('…e mais ' + (linesU.length - 25) + ' campanha(s).');
-        var headU = liveMode ? '\u{2705} Robô REMOVEU o limite de ' : '⚠️ Robô REMOVERIA o limite (dry) de ';
-        await sendTelegram(env, headU + linesU.length + ' campanha(s) que recuperou (ROAS>' + RULES.remLimRoas + '):\n\n' + showU.join('\n\n'));
-      }
+      /* AVISO "Robô REMOVERIA o limite" REMOVIDO (24/09) — o robô não remove mais (você remove manual) e
+         disparava falso p/ campanha nem limitada. */
       /* REATIVAR: pausadas ha >= pauseAlertMin(30) min c/ ROAS > reactRoas(1,4), repete a cada alertRepeatMin(30). */
       var linesR = [];
       for (var ri = 0; ri < reactList.length; ri++) {
