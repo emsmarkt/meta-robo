@@ -958,7 +958,7 @@ async function batchPostW(tk, batchArr) {
    madrugada, sem reaplicar apos a meia-noite. So em applyMode 'live'. Vale p/ CBO total E diario. Se a Meta
    recusar por minimo, applyCampCapW sobe p/ o minimo. Config: madGlobal {v,en} (todas) + madrugada {campId:{v,en}}
    (en:false EXCLUI; v>0 valor proprio). Vem do dashboard via POST /madrugada. */
-async function runMadrugada(env, allCamps, applyMode, force) {
+async function runMadrugada(env, allCamps, applyMode, force, tokens) {
   /* GLOBAL (KV madGlobal {v,en}) = vale p/ TODAS as campanhas ativas. OVERRIDES (KV madrugada {campId:{v,en}}):
      en:false EXCLUI a campanha; v>0 usa esse valor no lugar do global. */
   var glob = {}; try { var gs = await env.RULES_KV.get('madGlobal'); if (gs) glob = JSON.parse(gs) || {}; } catch (e) {}
@@ -995,8 +995,9 @@ async function runMadrugada(env, allCamps, applyMode, force) {
   var capDirty = false, applied = [], errors = [];
   var MAXOPS = 18, ops = 0; /* teto de operacoes por ciclo (subrequests do Cloudflare); o resto continua no proximo ciclo (guard por campanha) */
   /* O robo SO LIMITA (aplica o teto 1x na 1a rodada da janela). NAO REMOVE — o usuario remove MANUAL no dash. */
-  /* MECANISMO por TIPO DE ORCAMENTO: DIARIO -> spend_cap (gasto+X). VITALICIO -> baixa lifetime_budget p/
-     gasto+X (a Meta bloqueia spend_cap em vitalicio) e guarda o ORIGINAL em madOrigBud p/ o dash restaurar. */
+  /* MECANISMO por TIPO DE ORCAMENTO (NUNCA mexe no orcamento da campanha): DIARIO -> spend_cap da campanha
+     (gasto+X). VITALICIO -> LIMITE DE GASTO nos conjuntos ativos (lifetime_spend_cap), distribuindo o X: a
+     soma dos tetos = gasto+X, entao a campanha para em ~gasto+X sem tocar no orcamento total. Dash remove de manha. */
   for (var i = 0; i < targetsList.length; i++) {
     if (ops >= MAXOPS) break;
     var camp = targetsList[i].c, id = camp.id, X = targetsList[i].v, tk = camp._tk;
@@ -1009,8 +1010,10 @@ async function runMadrugada(env, allCamps, applyMode, force) {
     if (applyMode === 'live') {
       try {
         if (isLife) {
-          if (origBud[id] == null) { origBud[id] = parseInt(camp.lifetime_budget) || 0; origDirty = true; } /* guarda o original 1x */
-          await applyLifeBudgetW(tk, id, capCents);
+          /* garante os conjuntos carregados; aplica o limite de gasto do conjunto (NAO mexe no orcamento). */
+          if (!camp._adsets || !camp._adsets.length) { try { await batchAdsetCaps([camp]); } catch (e) {} }
+          var okLife = await applySpendCap(camp, tokens, campSpend, campSpend + X);
+          if (!okLife) throw new Error('limite nao aplicado nos conjuntos (sem conjunto ativo ou Meta recusou)');
         } else {
           await applyCampCapW(tk, id, capCents);
         }
@@ -1410,7 +1413,7 @@ async function run(env, opts) {
     } catch (e) { DIAG.tgErr = String((e && e.message) || e); }
   }
   /* LIMITE DE MADRUGADA: aplica o teto na janela (00:00-07:00 BR) e remove depois — automatico, 1x/dia. */
-  try { DIAG.mad = await runMadrugada(env, camps.concat(DAILY_CAMPS), applyMode, !!(opts && opts.madForce)); } catch (e) { DIAG.madErr = String((e && e.message) || e); }
+  try { DIAG.mad = await runMadrugada(env, camps.concat(DAILY_CAMPS), applyMode, !!(opts && opts.madForce), tokens); } catch (e) { DIAG.madErr = String((e && e.message) || e); }
   DIAG.blocked = BLOCKED.length; /* visivel no /run */
 
   var log = { at: new Date().toISOString(), mode: applyMode, mood: moodObj.mood, moodRoas: +moodObj.roas.toFixed(2), count: camps.length, diag: DIAG, actions: actions };
