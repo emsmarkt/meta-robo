@@ -949,7 +949,7 @@ async function batchPostW(tk, batchArr) {
    madrugada, sem reaplicar apos a meia-noite. So em applyMode 'live'. Vale p/ CBO total E diario. Se a Meta
    recusar por minimo, applyCampCapW sobe p/ o minimo. Config: madGlobal {v,en} (todas) + madrugada {campId:{v,en}}
    (en:false EXCLUI; v>0 valor proprio). Vem do dashboard via POST /madrugada. */
-async function runMadrugada(env, allCamps, applyMode) {
+async function runMadrugada(env, allCamps, applyMode, force) {
   /* GLOBAL (KV madGlobal {v,en}) = vale p/ TODAS as campanhas ativas. OVERRIDES (KV madrugada {campId:{v,en}}):
      en:false EXCLUI a campanha; v>0 usa esse valor no lugar do global. */
   var glob = {}; try { var gs = await env.RULES_KV.get('madGlobal'); if (gs) glob = JSON.parse(gs) || {}; } catch (e) {}
@@ -962,11 +962,11 @@ async function runMadrugada(env, allCamps, applyMode) {
   var endMin = parseHM(env.R_MADEND, 7 * 60);           /* 07:00 */
   var nowMin = brHour() * 60 + brMinute();
   var crosses = startMin > endMin; /* janela atravessa a meia-noite */
-  var inWindow = crosses ? (nowMin >= startMin || nowMin < endMin) : (nowMin >= startMin && nowMin < endMin);
+  var inWindow = force || (crosses ? (nowMin >= startMin || nowMin < endMin) : (nowMin >= startMin && nowMin < endMin));
   if (!inWindow) return { configured: 0, global: globalOn ? globalV : 0, brNow: nowMin, window: [startMin, endMin], note: 'fora da janela' };
   /* SESSÃO da madrugada (chave do guard): a MESMA p/ 23:30 de hoje e 00:05 de amanhã, p/ não reaplicar após
-     a meia-noite. Antes da meia-noite (nowMin>=start) = hoje; de madrugada (nowMin<end) = ontem. */
-  var session = (nowMin >= startMin) ? brDatePlus(0) : brDatePlus(-1);
+     a meia-noite. Antes da meia-noite (nowMin>=start) = hoje; de madrugada (nowMin<end) = ontem. force=hoje. */
+  var session = (force || nowMin >= startMin) ? brDatePlus(0) : brDatePlus(-1);
   var today = brDatePlus(0);
   var isActive = function (c) { return (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE'; };
   /* Lista de alvos = campanhas ATIVAS com valor efetivo (override ou global). */
@@ -1388,7 +1388,7 @@ async function run(env, opts) {
     } catch (e) { DIAG.tgErr = String((e && e.message) || e); }
   }
   /* LIMITE DE MADRUGADA: aplica o teto na janela (00:00-07:00 BR) e remove depois — automatico, 1x/dia. */
-  try { DIAG.mad = await runMadrugada(env, camps.concat(DAILY_CAMPS), applyMode); } catch (e) { DIAG.madErr = String((e && e.message) || e); }
+  try { DIAG.mad = await runMadrugada(env, camps.concat(DAILY_CAMPS), applyMode, !!(opts && opts.madForce)); } catch (e) { DIAG.madErr = String((e && e.message) || e); }
   DIAG.blocked = BLOCKED.length; /* visivel no /run */
 
   var log = { at: new Date().toISOString(), mode: applyMode, mood: moodObj.mood, moodRoas: +moodObj.roas.toFixed(2), count: camps.length, diag: DIAG, actions: actions };
@@ -1494,9 +1494,11 @@ export default {
     }
 
     if (path === '/run') {
-      /* /run?sched=HHMM (ex.: 0300, 1030, 2330) dispara o reset daquele slot AGORA, ignorando horario+guard (teste). */
+      /* /run?sched=HHMM (ex.: 0300, 1030, 2330) dispara o reset daquele slot AGORA, ignorando horario+guard (teste).
+         /run?madnow=1 FORÇA a madrugada rodar AGORA (ignora a janela 23:30-07:00) p/ testar na hora. */
       var _slot = (_u.searchParams.get('sched') || '').replace(/[^0-9]/g, '');
-      var r = await run(env, _slot ? { forceSched: _slot } : null);
+      var _madnow = _u.searchParams.get('madnow') === '1';
+      var r = await run(env, (_slot || _madnow) ? { forceSched: _slot || null, madForce: _madnow } : null);
       return jsonResp(r);
     }
 
