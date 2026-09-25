@@ -980,7 +980,7 @@ async function runMadrugada(env, allCamps, applyMode) {
   });
   if (!targetsList.length) return { configured: 0, global: globalOn ? globalV : 0 };
   var capDay = {}; try { var cdv = await env.RULES_KV.get('madCapDay'); if (cdv) capDay = JSON.parse(cdv) || {}; } catch (e) {}
-  var capDirty = false, applied = [];
+  var capDirty = false, applied = [], errors = [];
   var MAXOPS = 18, ops = 0; /* teto de operacoes por ciclo (subrequests do Cloudflare); o resto continua no proximo ciclo (guard por campanha) */
   /* O robo SO LIMITA (aplica o teto 1x na 1a rodada da janela). NAO REMOVE — o usuario remove MANUAL no dash. */
   /* MECANISMO: spend_cap no NÍVEL DA CAMPANHA = gasto TOTAL da campanha + X (o ad-set lifetime_spend_cap dava
@@ -994,9 +994,11 @@ async function runMadrugada(env, allCamps, applyMode) {
     var campSpend = (cd && cd.insights && cd.insights.data && cd.insights.data[0]) ? (parseFloat(cd.insights.data[0].spend) || 0) : 0;
     var capCents = Math.max(1, Math.round((campSpend + X) * 100));
     if (applyMode === 'live') {
-      try { await applyCampCapW(tk, id, capCents); capDay[id] = session; capDirty = true; } catch (e) {}
+      try { await applyCampCapW(tk, id, capCents); capDay[id] = session; capDirty = true; applied.push({ id: id, name: camp.name, v: X }); }
+      catch (e) { errors.push({ id: id, name: camp.name, msg: (e && e.message) ? e.message : String(e) }); }
+    } else {
+      applied.push({ id: id, name: camp.name, v: X }); /* dry: conta como "aplicaria" */
     }
-    applied.push({ id: id, name: camp.name, v: X });
   }
   if (capDirty) {
     /* poda sessoes antigas (> 3 dias) p/ nao crescer sem fim */
@@ -1004,18 +1006,30 @@ async function runMadrugada(env, allCamps, applyMode) {
     var clean = {}; Object.keys(capDay).forEach(function (k) { if (capDay[k] >= cutS) clean[k] = capDay[k]; });
     try { await env.RULES_KV.put('madCapDay', JSON.stringify(clean)); } catch (e) {}
   }
-  /* AVISO Telegram: 1x por SESSÃO de madrugada (não por campanha, não repete após a meia-noite).
-     Guard KV `madNotifyDay` = sessao. Só quando aplicou DE VERDADE (live). */
+  /* AVISO Telegram — 1 FRASE CURTA, 1x por SESSÃO de madrugada. SUCESSO e ERRO têm guards separados. Só em live. */
   var notified = false;
-  if (applied.length && applyMode === 'live' && env.TG_TOKEN && env.TG_CHAT) {
-    var notifDay = null; try { notifDay = await env.RULES_KV.get('madNotifyDay'); } catch (e) {}
-    if (notifDay !== session) {
-      var valTxt = globalOn ? ('$' + Math.round(globalV)) : 'o valor configurado';
-      try { await sendTelegram(env, '\u{1F319} Limite de madrugada aplicado — máx ' + valTxt + ' por campanha (gasto atual + valor). Remova de manhã no dash quando quiser.'); notified = true; } catch (e) {}
-      try { await env.RULES_KV.put('madNotifyDay', session); } catch (e) {}
+  if (applyMode === 'live' && env.TG_TOKEN && env.TG_CHAT) {
+    /* SUCESSO: "deu certo às 23:30". */
+    if (applied.length) {
+      var okDay = null; try { okDay = await env.RULES_KV.get('madNotifyDay'); } catch (e) {}
+      if (okDay !== session) {
+        var vTxt = globalOn ? ('$' + Math.round(globalV)) : 'o valor';
+        try { await sendTelegram(env, '\u{2705} Limite de madrugada 23:30 aplicado em ' + applied.length + ' campanha(s) (gasto atual + ' + vTxt + ').'); notified = true; } catch (e) {}
+        try { await env.RULES_KV.put('madNotifyDay', session); } catch (e) {}
+      }
+    }
+    /* ERRO: qual + como arrumar, em 1 frase. */
+    if (errors.length) {
+      var errDay = null; try { errDay = await env.RULES_KV.get('madErrDay'); } catch (e) {}
+      if (errDay !== session) {
+        var em = String(errors[0].msg || '').slice(0, 140);
+        var dica = /at least|pelo menos|too low|mínimo|minimo/i.test(em) ? ' (aumente o valor no dash)' : (/token|OAuth|190|session/i.test(em) ? ' (token inválido — gere um novo)' : ' (veja o valor/campo no dash)');
+        try { await sendTelegram(env, '\u{26A0}\u{FE0F} Madrugada 23:30 — erro em ' + errors.length + ' campanha(s): ' + em + '.' + dica); } catch (e) {}
+        try { await env.RULES_KV.put('madErrDay', session); } catch (e) {}
+      }
     }
   }
-  return { configured: targetsList.length, global: globalOn ? globalV : 0, applied: applied.length, notified: notified, session: session, brNow: nowMin, window: [startMin, endMin], mode: applyMode };
+  return { configured: targetsList.length, global: globalOn ? globalV : 0, applied: applied.length, errors: errors.length, err1: errors.length ? errors[0].msg : null, notified: notified, session: session, brNow: nowMin, window: [startMin, endMin], mode: applyMode };
 }
 async function run(env, opts) {
   var forceSched = (opts && opts.forceSched) || null; /* /run?sched=HHMM: dispara o reset daquele slot AGORA (teste) */
