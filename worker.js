@@ -932,6 +932,15 @@ async function applyCampCapW(tk, campId, cents) {
   }
   return v;
 }
+/* VITALICIO: baixa o lifetime_budget da CAMPANHA p/ o teto (a campanha para ao atingir). Min-retry. */
+async function applyLifeBudgetW(tk, campId, cents) {
+  var v = cents;
+  for (var n = 0; n < 4; n++) {
+    try { await postForm(campId, tk, { lifetime_budget: v }); return v; }
+    catch (e) { var mn = metaMinCentsW(e && e.message); if (mn && mn > v) { v = mn; continue; } throw e; }
+  }
+  return v;
+}
 /* POST em LOTE (Batch API) — sub-requests ja prontos (relative_url + body). Lotes de 50. */
 async function batchPostW(tk, batchArr) {
   for (var i = 0; i < batchArr.length; i += 50) {
@@ -979,27 +988,40 @@ async function runMadrugada(env, allCamps, applyMode, force) {
     if (v > 0) targetsList.push({ c: c, v: v });
   });
   if (!targetsList.length) return { configured: 0, global: globalOn ? globalV : 0 };
+  /* originais dos orcamentos VITALICIOS baixados (p/ o dash restaurar de manha). {campId: origCents} */
+  var origBud = {}; try { var ob = await env.RULES_KV.get('madOrigBud'); if (ob) origBud = JSON.parse(ob) || {}; } catch (e) {}
+  var origDirty = false;
   var capDay = {}; try { var cdv = await env.RULES_KV.get('madCapDay'); if (cdv) capDay = JSON.parse(cdv) || {}; } catch (e) {}
   var capDirty = false, applied = [], errors = [];
   var MAXOPS = 18, ops = 0; /* teto de operacoes por ciclo (subrequests do Cloudflare); o resto continua no proximo ciclo (guard por campanha) */
   /* O robo SO LIMITA (aplica o teto 1x na 1a rodada da janela). NAO REMOVE — o usuario remove MANUAL no dash. */
-  /* MECANISMO: spend_cap no NÍVEL DA CAMPANHA = gasto TOTAL da campanha + X (o ad-set lifetime_spend_cap dava
-     "Invalid parameter"). spend_cap é o campo padrão da Meta p/ limite de gasto total, vale diário e vitalício. */
+  /* MECANISMO por TIPO DE ORCAMENTO: DIARIO -> spend_cap (gasto+X). VITALICIO -> baixa lifetime_budget p/
+     gasto+X (a Meta bloqueia spend_cap em vitalicio) e guarda o ORIGINAL em madOrigBud p/ o dash restaurar. */
   for (var i = 0; i < targetsList.length; i++) {
     if (ops >= MAXOPS) break;
     var camp = targetsList[i].c, id = camp.id, X = targetsList[i].v, tk = camp._tk;
     if (capDay[id] === session) continue; /* ja limitou nesta madrugada (23:30 -> 07:00) */
     ops++;
+    var isLife = parseInt(camp.lifetime_budget) > 0;
     var cd = null; try { cd = await fj(API + '/' + id + '?fields=insights.date_preset(maximum){spend}&access_token=' + tk); } catch (e) {}
     var campSpend = (cd && cd.insights && cd.insights.data && cd.insights.data[0]) ? (parseFloat(cd.insights.data[0].spend) || 0) : 0;
     var capCents = Math.max(1, Math.round((campSpend + X) * 100));
     if (applyMode === 'live') {
-      try { await applyCampCapW(tk, id, capCents); capDay[id] = session; capDirty = true; applied.push({ id: id, name: camp.name, v: X }); }
+      try {
+        if (isLife) {
+          if (origBud[id] == null) { origBud[id] = parseInt(camp.lifetime_budget) || 0; origDirty = true; } /* guarda o original 1x */
+          await applyLifeBudgetW(tk, id, capCents);
+        } else {
+          await applyCampCapW(tk, id, capCents);
+        }
+        capDay[id] = session; capDirty = true; applied.push({ id: id, name: camp.name, v: X, life: isLife });
+      }
       catch (e) { errors.push({ id: id, name: camp.name, msg: (e && e.message) ? e.message : String(e) }); }
     } else {
-      applied.push({ id: id, name: camp.name, v: X }); /* dry: conta como "aplicaria" */
+      applied.push({ id: id, name: camp.name, v: X, life: isLife }); /* dry: conta como "aplicaria" */
     }
   }
+  if (origDirty) { try { await env.RULES_KV.put('madOrigBud', JSON.stringify(origBud)); } catch (e) {} }
   if (capDirty) {
     /* poda sessoes antigas (> 3 dias) p/ nao crescer sem fim */
     var cutS = brDatePlus(-3);
@@ -1029,7 +1051,7 @@ async function runMadrugada(env, allCamps, applyMode, force) {
       }
     }
   }
-  return { configured: targetsList.length, global: globalOn ? globalV : 0, applied: applied.length, errors: errors.length, err1: errors.length ? errors[0].msg : null, notified: notified, session: session, brNow: nowMin, window: [startMin, endMin], mode: applyMode };
+  return { configured: targetsList.length, skippedLifetime: skippedLife, global: globalOn ? globalV : 0, applied: applied.length, errors: errors.length, err1: errors.length ? errors[0].msg : null, notified: notified, session: session, brNow: nowMin, window: [startMin, endMin], mode: applyMode };
 }
 async function run(env, opts) {
   var forceSched = (opts && opts.forceSched) || null; /* /run?sched=HHMM: dispara o reset daquele slot AGORA (teste) */
@@ -1440,12 +1462,18 @@ export default {
     if (path === '/madrugada') {
       var mm = {}; try { var ms = await env.RULES_KV.get('madrugada'); if (ms) mm = JSON.parse(ms) || {}; } catch (e) {}
       var gg = {}; try { var gs2 = await env.RULES_KV.get('madGlobal'); if (gs2) gg = JSON.parse(gs2) || {}; } catch (e) {}
+      var ob = {}; try { var obs = await env.RULES_KV.get('madOrigBud'); if (obs) ob = JSON.parse(obs) || {}; } catch (e) {}
       if (request.method === 'POST') {
         var mb = {}; try { mb = await request.json(); } catch (e) {}
         if (mb && mb.global) {
           var gv = parseFloat(mb.v) || 0;
           gg = { v: gv, en: (mb.en !== false && gv > 0) };
           try { await env.RULES_KV.put('madGlobal', JSON.stringify(gg)); } catch (e) {}
+        } else if (mb && mb.origSet && mb.id) {
+          /* dash guarda o orcamento ORIGINAL de uma vitalicia que ele limitou (1x — nao sobrescreve). */
+          if (ob[mb.id] == null && parseInt(mb.orig) > 0) { ob[mb.id] = parseInt(mb.orig); try { await env.RULES_KV.put('madOrigBud', JSON.stringify(ob)); } catch (e) {} }
+        } else if (mb && mb.origClear && mb.id) {
+          delete ob[mb.id]; try { await env.RULES_KV.put('madOrigBud', JSON.stringify(ob)); } catch (e) {}
         } else if (mb && mb.id) {
           if (mb.remove) { delete mm[mb.id]; }
           else {
@@ -1455,9 +1483,9 @@ export default {
           }
           try { await env.RULES_KV.put('madrugada', JSON.stringify(mm)); } catch (e) {}
         }
-        return jsonResp({ ok: true, global: gg, camps: mm });
+        return jsonResp({ ok: true, global: gg, camps: mm, origBud: ob });
       }
-      return jsonResp({ global: gg, camps: mm });
+      return jsonResp({ global: gg, camps: mm, origBud: ob });
     }
 
     /* Historico append-only COMPARTILHADO (lista RICA acumulada). Tem entradas do robo
