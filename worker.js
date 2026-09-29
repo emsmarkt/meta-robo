@@ -1413,7 +1413,9 @@ async function run(env, opts) {
     } catch (e) { DIAG.tgErr = String((e && e.message) || e); }
   }
   /* LIMITE DE MADRUGADA: aplica o teto na janela (00:00-07:00 BR) e remove depois — automatico, 1x/dia. */
-  try { DIAG.mad = await runMadrugada(env, camps.concat(DAILY_CAMPS), applyMode, !!(opts && opts.madForce), tokens); } catch (e) { DIAG.madErr = String((e && e.message) || e); }
+  /* 🚫 REGRA DE MADRUGADA DESATIVADA (pedido do usuário 28/09): o robô NUNCA aplica limite de gasto sozinho.
+     O LIMITE DE GASTO agora é 100% MANUAL, pelos botões do dash. runMadrugada fica no código mas não é chamado. */
+  DIAG.mad = { disabled: true, note: 'regra automática de madrugada DESATIVADA — limite de gasto só manual no dash' };
   DIAG.blocked = BLOCKED.length; /* visivel no /run */
 
   var log = { at: new Date().toISOString(), mode: applyMode, mood: moodObj.mood, moodRoas: +moodObj.roas.toFixed(2), count: camps.length, diag: DIAG, actions: actions };
