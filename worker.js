@@ -1273,19 +1273,9 @@ async function run(env, opts) {
         var headL = liveMode ? '\u{1F6A7} Robô LIMITOU o gasto de ' : '⚠️ Robô LIMITARIA o gasto (dry) de ';
         await sendTelegram(env, headL + linesL.length + ' campanha(s):\n\n' + showL.join('\n\n'));
       }
-      /* RITMO REDUZIDO (termino +cutDays): freio GENTIL, sem catch-up/dump. */
-      var linesC = [];
-      for (var ci = 0; ci < cortadaList.length; ci++) {
-        var cc = cortadaList[ci];
-        var ckC = cc.id + ':cortar';
-        if (canSend(ckC)) { linesC.push('• ' + cc.name + '\n   ' + cc.action); newSent[ckC] = nowT; }
-      }
-      if (linesC.length) {
-        var showC = linesC.slice(0, 25);
-        if (linesC.length > 25) showC.push('…e mais ' + (linesC.length - 25) + ' campanha(s).');
-        var headC = liveMode ? '\u{2702}\u{FE0F} Robô REDUZIU o ritmo de ' : '⚠️ Robô REDUZIRIA o ritmo (dry, não aplicou) de ';
-        await sendTelegram(env, headC + linesC.length + ' campanha(s):\n\n' + showC.join('\n\n'));
-      }
+      /* 🚫 AVISO "Robô REDUZIRIA o ritmo (dry, não aplicou)" REMOVIDO (pedido do usuário 29/09): conflitava/
+         duplicava com o "ROAS baixo — ACOMPANHAR" (mesma campanha aparecia nos dois). O CORTAR/REDUZIR RITMO
+         é alerta-only mesmo, então não manda mais esse bloco. (cortadaList continua populada, só não envia.) */
       /* RESTAURAR: recuperou o ROAS e recebeu de volta o diario de antes do CORTAR. */
       var linesR2 = [];
       for (var r2i = 0; r2i < restList.length; r2i++) {
