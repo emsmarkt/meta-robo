@@ -43,7 +43,7 @@ var RULES = {
   limRoas: 1.5, // COM venda: ROAS < isso -> CORTAR (reduz orcamento). Subiu 1,4 -> 1,5 (24/07).
   limMinSpend: 1, // SO limita por ROAS se gasto > isso. Evita o falso ROAS 0 na virada (venda sincroniza antes do gasto).
   remLimRoas: 1.5, remLimStart: 10, remLimEnd: 23, // robo REMOVE o limite sozinho se ROAS > 1,5 entre remLimStart(10h) e remLimEnd(23h) BR (campanha recuperou).
-  pauseRoas: 1.7, escRoas: 1.7, escPct: 0.20, pauseSalesBreak: 3, // PAUSAR(esperar rebote) enquanto ROAS < 1,7. Subiu 1,5 -> 1,7 (24/07). Reativa/AUMENTA: ROAS>=1,7
+  pauseRoas: 1.5, escRoas: 1.7, escPct: 0.20, pauseSalesBreak: 3, // ACOMPANHAR enquanto ROAS < 1,5 (01/10 — pedido: avisar SÓ quando bater 1,5). escRoas (reativa/AUMENTA) segue 1,7
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
   /* AUMENTAR (so SUGESTAO): so apos aumHourBR(20h) BR, ROAS de HOJE >= pauseRoas(1,5) E ROAS dos ult. 7 dias > aumRoas7dMin(1,4) -> subir o diario p/ aumMult(1,5)x o atual.
@@ -76,7 +76,7 @@ function buildRules(env) {
     schedWindowMin: n('R_SCHEDWIN', 12), cutDaysMax: n('R_CUTDAYSMAX', 364),
     restoreRoas: n('R_RESTOREROAS', 1.5),
     dailyAlertSpend: n('R_DAILYSPEND', 100), dailyAlertCpc: n('R_DAILYCPC', 2), dailyAlertCpi: n('R_DAILYCPI', 55),
-    pauseRoas: n('R_PAUSEROAS', 1.7), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
+    pauseRoas: n('R_PAUSEROAS', 1.5), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
     limSpendTrigger: n('R_LIMTRIG', 90), limSpendCap: n('R_LIMCAP', 120),
     limRoas: n('R_LIMROAS', 1.5), limMinSpend: n('R_LIMMINSPEND', 1),
     remLimRoas: n('R_REMLIMROAS', 1.5), remLimStart: n('R_REMLIMSTART', 10), remLimEnd: n('R_REMLIMEND', 23),
@@ -239,10 +239,10 @@ function suggestRule(c, mood) {
     if (sp >= RULES.cutNoSaleSpend && c._rtOk) return { action: 'CORTAR (+' + RULES.cutDays + 'd — $' + Math.round(sp) + ' hoje SEM venda)', key: 'CORTAR', target: cortarTarget, newEnd: cortarEnd, cpa: null, roas: 0, sales: 0, spend: sp };
     return { action: 'COLETANDO', key: 'COLETANDO', target: null, newEnd: null, cpa: Infinity, roas: 0, sales: 0, spend: sp };
   }
-  /* COM VENDA e menos de aumMaxSales(5) vendas: ROAS < limRoas(1,4) -> CORTAR (+cutDays, reduz ritmo);
-     limRoas(1,4) <= ROAS < pauseRoas(1,5) -> PAUSAR (esperar o REBOTE da atribuicao 1h08; run() avisa p/ reativar antes de 1h). */
+  /* COM VENDA e menos de aumMaxSales(5) vendas: ROAS < pauseRoas(1,5) -> ACOMPANHAR (aviso ÚNICO; o robô NÃO
+     pausa). Unificado em 01/10 (pedido do usuário): antes dividia em CORTAR(<1,4)+PAUSAR(1,4–1,7); agora avisa
+     SÓ quando ROAS < 1,5, sem zona silenciosa. SEM venda (sales==0) segue no CORTAR lá em cima (sem alerta). */
   if (sales < RULES.aumMaxSales && sp > RULES.limMinSpend) {
-    if (roas < RULES.limRoas) return { action: 'REDUZIR RITMO (+' + RULES.cutDays + 'd — ROAS ' + roas.toFixed(2) + ' < ' + RULES.limRoas + ', ' + sales + ' venda)', key: 'CORTAR', target: cortarTarget, newEnd: cortarEnd, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
     if (roas < RULES.pauseRoas) return { action: 'ROAS baixo — ACOMPANHAR (ROAS ' + roas.toFixed(2) + ' < ' + RULES.pauseRoas + ', ' + sales + ' venda). Avalie limitar no dash — o robô NÃO pausa.', key: 'PAUSAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
   }
   /* CAMPEA: >= aumMaxSales(5) vendas -> NUNCA corta (gestao manual, robo nao freia). Escala se ROAS alto. */
@@ -1247,13 +1247,16 @@ async function run(env, opts) {
       var sent = {}; try { var ss = await env.RULES_KV.get('tgSent'); if (ss) { var sj = JSON.parse(ss); if (sj && typeof sj === 'object') sent = sj; } } catch (e) {}
       var newSent = {}; Object.keys(sent).forEach(function (k) { if (typeof sent[k] === 'number' && (nowT - sent[k]) < 26 * 3600000) newSent[k] = sent[k]; });
       var canSend = function (k) { return !newSent[k] || (nowT - newSent[k]) >= repMs; };
+      /* ACOMPANHAR repete a cada 30 min (pedido do usuário 01/10), independente do alertRepeatMin dos outros. */
+      var repMsWatch = 30 * 60000;
+      var canSendWatch = function (k) { return !newSent[k] || (nowT - newSent[k]) >= repMsWatch; };
       var liveMode = false; /* REGRAS ANTIGAS = SÓ ALERTA: o robô nunca aplica (só a madrugada aplica). */
-      /* AVISO "ROAS baixo — ACOMPANHAR" (24/09): a gente NÃO pausa mais; só avisa p/ acompanhar/limitar. */
+      /* AVISO "ROAS baixo — ACOMPANHAR" (24/09): a gente NÃO pausa mais; só avisa p/ acompanhar/limitar. ROAS < 1,5, a cada 30 min. */
       var lines = [];
       for (var pi = 0; pi < pausedList.length; pi++) {
         var pp = pausedList[pi];
         var pk = pp.id + ':watch';
-        if (canSend(pk)) { lines.push('• ' + pp.name + '\n   ' + pp.action); newSent[pk] = nowT; }
+        if (canSendWatch(pk)) { lines.push('• ' + pp.name + '\n   ' + pp.action); newSent[pk] = nowT; }
       }
       if (lines.length) {
         var show = lines.slice(0, 25);
@@ -1326,29 +1329,7 @@ async function run(env, opts) {
         if (linesR.length > 25) showR.push('…e mais ' + (linesR.length - 25) + ' campanha(s).');
         await sendTelegram(env, '⏰ REATIVAR — ' + linesR.length + ' campanha(s) pausada(s) ha >' + RULES.pauseAlertMin + ' min com ROAS > ' + RULES.reactRoas + ':\n\n' + showR.join('\n\n'));
       }
-      /* CBO DIARIO com metricas caras: ATIVA, gasto hoje >= dailyAlertSpend($100), 0 venda,
-         CPC > dailyAlertCpc($2) E CPI > dailyAlertCpi($55). 1x por dia por campanha (chave c/ today). */
-      var linesD = [];
-      for (var di2 = 0; di2 < DAILY_CAMPS.length; di2++) {
-        var dc = DAILY_CAMPS[di2];
-        if ((dc.effective_status || dc.status || '').toUpperCase() !== 'ACTIVE') continue;
-        var dsp = dc._spendToday || 0, dsales = dc._sales || 0, dclk = dc._clicks || 0, dic = dc._ic || 0;
-        if (dsales !== 0 || dsp < RULES.dailyAlertSpend) continue;
-        var dcpc = dclk > 0 ? dsp / dclk : (dsp > 0 ? Infinity : 0);
-        var dcpi = dic > 0 ? dsp / dic : (dsp > 0 ? Infinity : 0);
-        if (!(dcpc > RULES.dailyAlertCpc && dcpi > RULES.dailyAlertCpi)) continue;
-        var dk2 = dc.id + ':dailyalert:' + today; /* 1x por dia por campanha */
-        if (newSent[dk2]) continue;
-        var cpcTxt = isFinite(dcpc) ? '$' + dcpc.toFixed(2) : 'alto (0 cliques)';
-        var cpiTxt = isFinite(dcpi) ? '$' + dcpi.toFixed(2) : 'alto (0 IC)';
-        linesD.push('• ' + dc.name + '\n   $' + Math.round(dsp) + ' hoje · 0 venda · CPC ' + cpcTxt + ' · CPI ' + cpiTxt);
-        newSent[dk2] = nowT;
-      }
-      if (linesD.length) {
-        var showD = linesD.slice(0, 25);
-        if (linesD.length > 25) showD.push('…e mais ' + (linesD.length - 25) + ' campanha(s).');
-        await sendTelegram(env, '\u{1F4B8} CBO DIÁRIO caro sem venda (gasto>$' + RULES.dailyAlertSpend + ' · CPC>$' + RULES.dailyAlertCpc + ' · CPI>$' + RULES.dailyAlertCpi + ') — ' + linesD.length + ' campanha(s):\n\n' + showD.join('\n\n'));
-      }
+      /* 🚫 AVISO "CBO DIÁRIO caro sem venda" REMOVIDO (pedido do usuário 01/10). */
       try { await env.RULES_KV.put('tgSent', JSON.stringify(newSent)); } catch (e) {}
 
       /* CONTA BLOQUEADA (status 2) que gastou nos ult. 7 dias -> avisa 1x SO (ate a conta voltar a ativa).
