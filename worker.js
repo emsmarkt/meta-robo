@@ -178,7 +178,7 @@ function remainingOf(c) { return (parseFloat(c.lifetime_budget) / 100) - (c._spe
 function currentDailyOf(c) { var dl = daysLeftOf(c), r = remainingOf(c); return (dl > 0 && r > 0) ? r / dl : 0; }
 function computeMood(camps) {
   var rev = 0, sp = 0;
-  camps.forEach(function (c) { rev += (c._sales || 0) * 260; sp += c._spendToday || 0; });
+  camps.forEach(function (c) { rev += (c._rev > 0 ? c._rev : (c._sales || 0) * 120); sp += c._spendToday || 0; }); /* receita REAL do RedTrack (fallback vendas×120) — não ×260 */
   var r = sp > 0 ? rev / sp : 0;
   return { roas: r, mood: r >= RULES.dayGood ? 'good' : (r >= RULES.dayOk ? 'normal' : 'bad') };
 }
@@ -187,11 +187,12 @@ function suggestRule(c, mood) {
   /* CP_VALD (validada): FORA das regras de CORTAR/ROAS/pausa (01/08). O robo NAO mexe — Emerson gerencia MANUAL.
      So gera um AVISO 1x/dia no Telegram (ver run(): junta os key==='VALD' em valdList). CP_TST segue as regras normais. */
   if (_nmU.indexOf('VALD') >= 0) {
-    var spV = c._spendToday || 0, salesV = c._sales || 0, roasV = spV > 0 ? (salesV * 260) / spV : 0;
+    var spV = c._spendToday || 0, salesV = c._sales || 0, roasV = spV > 0 ? ((c._rev > 0 ? c._rev : salesV * 120)) / spV : 0;
     return { action: 'VALD — gestão manual (robô só avisa 1x/dia)', key: 'VALD', target: null, newEnd: null, cpa: salesV > 0 ? spV / salesV : null, roas: roasV, sales: salesV, spend: spV };
   }
   var sp = c._spendToday || 0, sales = c._sales || 0;
-  var roas = sp > 0 ? (sales * 260) / sp : 0;
+  var rev = (c._rev > 0) ? c._rev : (sales * 120); /* receita REAL do RedTrack (fallback vendas×120) — não ×260 */
+  var roas = sp > 0 ? rev / sp : 0;
   var cpa = sales > 0 ? sp / sales : Infinity;
   var rem = remainingOf(c);
   /* CORTAR = REDUZIR RITMO: empurra o termino p/ +cutDays (364 ~ 1 ano). diario ~ saldo/364.
@@ -609,7 +610,9 @@ async function collect(env) {
             if (row.sub3 == null) return;
             var s7 = parseInt(row['convtype' + pType7]) || parseInt(row.approved) || 0;
             var cst7 = 0; ['cost', 'total_cost', 'spend', 'ad_cost'].forEach(function (k) { if (!cst7 && row[k] != null && row[k] !== '') cst7 = parseFloat(row[k]) || 0; });
-            if (cst7 > 0) { var spU = cst7 / fx; map7[String(row.sub3)] = spU > 0 ? (s7 * 260) / spU : 0; }
+            /* RedTrack já em USD: NÃO divide por fx. ROAS = receita REAL / custo (fallback vendas×120). */
+            var rev7 = parseFloat(row.revenue) || parseFloat(row['revenuetype' + pType7]) || parseFloat(row.total_revenue) || (s7 * 120);
+            if (cst7 > 0) { map7[String(row.sub3)] = rev7 / cst7; }
           });
           camps.forEach(function (c) { c._roas7d = map7[String(c.id)] || 0; });
           try { await env.RULES_KV.put('roas7d', JSON.stringify({ t: Date.now(), m: map7 })); } catch (e) {}
@@ -1228,9 +1231,12 @@ async function run(env, opts) {
       /* PAUSADA por QUALQUER motivo (robo OU manual): registra quando o robo a viu pausada pela 1a vez. */
       if (!pausedAt[c.id]) { pausedAt[c.id] = Date.now(); pausedAtDirty = true; }
       var elapP = Date.now() - pausedAt[c.id];
-      /* AVISO p/ REATIVAR: pausada ha >= pauseAlertMin(30) min E ROAS > reactRoas(1,4). */
-      if (elapP >= RULES.pauseAlertMin * 60000 && r.roas > RULES.reactRoas) {
-        reactList.push({ id: c.id, name: c.name, mins: Math.round(elapP / 60000), roas: +r.roas.toFixed(2) });
+      /* AVISO p/ REATIVAR: pausada ha >= pauseAlertMin(30) min E ROAS > reactRoas(1,4). ROAS = RECEITA REAL do
+         RedTrack / gasto (o r.roas do suggestRule usa ×260 e dava ROAS FALSO inflado). Fallback vendas×120. */
+      var reactRev = (c._rev > 0) ? c._rev : ((c._sales || 0) * 120);
+      var reactRoasReal = (c._spendToday > 0) ? (reactRev / c._spendToday) : 0;
+      if (elapP >= RULES.pauseAlertMin * 60000 && reactRoasReal > RULES.reactRoas) {
+        reactList.push({ id: c.id, name: c.name, mins: Math.round(elapP / 60000), roas: +reactRoasReal.toFixed(2) });
       }
     }
   }
@@ -1254,6 +1260,9 @@ async function run(env, opts) {
       /* ACOMPANHAR repete a cada 30 min (pedido do usuário 01/10), independente do alertRepeatMin dos outros. */
       var repMsWatch = 30 * 60000;
       var canSendWatch = function (k) { return !newSent[k] || (nowT - newSent[k]) >= repMsWatch; };
+      /* ROAS CRÍTICO repete DE HORA EM HORA (pedido do usuário 02/10). */
+      var repMsHour = 60 * 60000;
+      var canSendHour = function (k) { return !newSent[k] || (nowT - newSent[k]) >= repMsHour; };
       var liveMode = false; /* REGRAS ANTIGAS = SÓ ALERTA: o robô nunca aplica (só a madrugada aplica). */
       /* AVISO "ROAS baixo — ACOMPANHAR" (24/09): a gente NÃO pausa mais; só avisa p/ acompanhar/limitar. ROAS < 1,5, a cada 30 min. */
       var lines = [];
@@ -1278,7 +1287,7 @@ async function run(env, opts) {
         var croas = csp > 0 ? crev / csp : 0;
         if (croas > RULES.critRoas) return; /* só <= 1,3 */
         var ck = c.id + ':crit';
-        if (!canSendWatch(ck)) return;
+        if (!canSendHour(ck)) return; /* de hora em hora */
         linesCrit.push('• ' + c.name + '\n   ROAS ' + croas.toFixed(2) + ' (≤ ' + RULES.critRoas + ') · gasto $' + Math.round(csp) + ' · ' + (c._sales || 0) + ' venda(s)');
         newSent[ck] = nowT;
       });
