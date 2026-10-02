@@ -43,7 +43,8 @@ var RULES = {
   limRoas: 1.5, // COM venda: ROAS < isso -> CORTAR (reduz orcamento). Subiu 1,4 -> 1,5 (24/07).
   limMinSpend: 1, // SO limita por ROAS se gasto > isso. Evita o falso ROAS 0 na virada (venda sincroniza antes do gasto).
   remLimRoas: 1.5, remLimStart: 10, remLimEnd: 23, // robo REMOVE o limite sozinho se ROAS > 1,5 entre remLimStart(10h) e remLimEnd(23h) BR (campanha recuperou).
-  pauseRoas: 1.5, escRoas: 1.7, escPct: 0.20, pauseSalesBreak: 3, // ACOMPANHAR enquanto ROAS < 1,5 (01/10 — pedido: avisar SÓ quando bater 1,5). escRoas (reativa/AUMENTA) segue 1,7
+  pauseRoas: 1.5, escRoas: 1.7, escPct: 0.20, pauseSalesBreak: 3, // ACOMPANHAR enquanto 1,3 < ROAS < 1,5 (01/10). escRoas (reativa/AUMENTA) segue 1,7
+  critRoas: 1.3, critMinSpend: 50, // 🔴 ROAS CRÍTICO (02/10): campanha ATIVA, gasto > critMinSpend($50), ROAS <= 1,3 -> aviso Telegram + visual, INDEPENDENTE do nº de vendas
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
   /* AUMENTAR (so SUGESTAO): so apos aumHourBR(20h) BR, ROAS de HOJE >= pauseRoas(1,5) E ROAS dos ult. 7 dias > aumRoas7dMin(1,4) -> subir o diario p/ aumMult(1,5)x o atual.
@@ -77,6 +78,7 @@ function buildRules(env) {
     restoreRoas: n('R_RESTOREROAS', 1.5),
     dailyAlertSpend: n('R_DAILYSPEND', 100), dailyAlertCpc: n('R_DAILYCPC', 2), dailyAlertCpi: n('R_DAILYCPI', 55),
     pauseRoas: n('R_PAUSEROAS', 1.5), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
+    critRoas: n('R_CRITROAS', 1.3), critMinSpend: n('R_CRITMINSPEND', 50),
     limSpendTrigger: n('R_LIMTRIG', 90), limSpendCap: n('R_LIMCAP', 120),
     limRoas: n('R_LIMROAS', 1.5), limMinSpend: n('R_LIMMINSPEND', 1),
     remLimRoas: n('R_REMLIMROAS', 1.5), remLimStart: n('R_REMLIMSTART', 10), remLimEnd: n('R_REMLIMEND', 23),
@@ -243,7 +245,7 @@ function suggestRule(c, mood) {
      pausa). Unificado em 01/10 (pedido do usuário): antes dividia em CORTAR(<1,4)+PAUSAR(1,4–1,7); agora avisa
      SÓ quando ROAS < 1,5, sem zona silenciosa. SEM venda (sales==0) segue no CORTAR lá em cima (sem alerta). */
   if (sales < RULES.aumMaxSales && sp > RULES.limMinSpend) {
-    if (roas < RULES.pauseRoas) return { action: 'ROAS baixo — ACOMPANHAR (ROAS ' + roas.toFixed(2) + ' < ' + RULES.pauseRoas + ', ' + sales + ' venda). Avalie limitar no dash — o robô NÃO pausa.', key: 'PAUSAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
+    if (roas < RULES.pauseRoas && roas > RULES.critRoas) return { action: 'ROAS baixo — ACOMPANHAR (ROAS ' + roas.toFixed(2) + ' < ' + RULES.pauseRoas + ', ' + sales + ' venda). Avalie limitar no dash — o robô NÃO pausa.', key: 'PAUSAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp }; /* ROAS <= critRoas(1,3) cai no alerta CRÍTICO separado (independe de vendas) */
   }
   /* CAMPEA: >= aumMaxSales(5) vendas -> NUNCA corta (gestao manual, robo nao freia). Escala se ROAS alto. */
   if (sales > RULES.aumMaxSales) return { action: 'MANTER (>' + RULES.aumMaxSales + ' vendas, ROAS ' + roas.toFixed(2) + ' — gestao manual)', key: 'MANTER', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
@@ -539,7 +541,7 @@ async function collect(env) {
     /* fx (cambio ao vivo) ja definido no inicio da collect. */
     var pickNum = function(o, ks){ for (var i=0;i<ks.length;i++){ var v=o[ks[i]]; if (v!=null && v!=='' && !isNaN(parseFloat(v))) return parseFloat(v); } return 0; };
     var icType = env.RT_ICTYPE || '2';
-    var by = {}, byCost = {}, byClicks = {}, byIC = {};
+    var by = {}, byCost = {}, byClicks = {}, byIC = {}, byRev = {};
     (Array.isArray(rows) ? rows : []).forEach(function (row) {
       if (row.sub3 != null) {
         /* Vendas = convtype{N}; se 0, cai pra 'approved' (algumas contas usam esse campo). */
@@ -549,6 +551,7 @@ async function collect(env) {
         byCost[String(row.sub3)] = pickNum(row, ['cost','total_cost','spend','ad_cost']);
         byClicks[String(row.sub3)] = pickNum(row, ['clicks']);
         byIC[String(row.sub3)] = parseInt(row['convtype' + icType]) || 0;
+        byRev[String(row.sub3)] = pickNum(row, ['revenue', 'revenuetype' + pType, 'total_revenue']); /* receita REAL (USD) p/ ROAS certo */
       }
     });
     /* RedTrack fica SO p/ VENDAS e IC. GASTO e CLIQUES (de link) vem do Meta (batchTodayMeta).
@@ -562,6 +565,7 @@ async function collect(env) {
     var applyRt = function (c) {
       c._sales = by[String(c.id)] || 0;
       c._ic = byIC[String(c.id)] || 0;
+      c._rev = byRev[String(c.id)] || 0;      /* receita REAL do RedTrack (USD) — p/ ROAS do alerta crítico */
       c._rtOk = rtOk;
       c._spendToday = c._metaToday || 0;      /* GASTO = Meta */
       c._clicks = c._metaLinkClicks || 0;     /* CLIQUES = cliques no link do Meta */
@@ -1262,6 +1266,26 @@ async function run(env, opts) {
         var show = lines.slice(0, 25);
         if (lines.length > 25) show.push('…e mais ' + (lines.length - 25) + ' campanha(s).');
         await sendTelegram(env, '\u{1F440} ROAS baixo — ACOMPANHAR (o robô NÃO pausa; limite no dash se quiser) — ' + lines.length + ' campanha(s):\n\n' + show.join('\n\n'));
+      }
+      /* 🔴 ROAS CRÍTICO <= critRoas(1,3) — INDEPENDENTE do nº de vendas (pedido 02/10). Varre TODAS as campanhas
+         ATIVAS (CBO + diárias) com gasto > critMinSpend($50). ROAS = receita REAL do RedTrack / gasto (fallback
+         vendas×120 se não vier revenue). Repete a cada 30 min. Não sobrepõe o ACOMPANHAR (que é 1,3 < ROAS < 1,5). */
+      var linesCrit = [];
+      (camps.concat(DAILY_CAMPS)).forEach(function (c) {
+        if ((c.effective_status || c.status || '').toUpperCase() !== 'ACTIVE') return;
+        var csp = c._spendToday || 0; if (csp <= RULES.critMinSpend) return;
+        var crev = (c._rev > 0) ? c._rev : ((c._sales || 0) * 120);
+        var croas = csp > 0 ? crev / csp : 0;
+        if (croas > RULES.critRoas) return; /* só <= 1,3 */
+        var ck = c.id + ':crit';
+        if (!canSendWatch(ck)) return;
+        linesCrit.push('• ' + c.name + '\n   ROAS ' + croas.toFixed(2) + ' (≤ ' + RULES.critRoas + ') · gasto $' + Math.round(csp) + ' · ' + (c._sales || 0) + ' venda(s)');
+        newSent[ck] = nowT;
+      });
+      if (linesCrit.length) {
+        var showCrit = linesCrit.slice(0, 25);
+        if (linesCrit.length > 25) showCrit.push('…e mais ' + (linesCrit.length - 25) + ' campanha(s).');
+        await sendTelegram(env, '\u{1F534} ROAS CRÍTICO (≤ ' + RULES.critRoas + ') — VERIFIQUE — ' + linesCrit.length + ' campanha(s):\n\n' + showCrit.join('\n\n'));
       }
       /* LIMITE DE GASTO (soft-stop sem venda). */
       var linesL = [];
