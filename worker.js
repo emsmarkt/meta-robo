@@ -890,10 +890,15 @@ function adRejectReason(ad) {
    na própria edge /ads (só puxa os rejeitados = leve) e roda em LOTE por token (50 campanhas/chamada,
    Batch API) p/ não estourar rate limit. */
 async function checkAdRejections(env, allCamps) {
-  var out = [];
+  var out = [], actives = [];
   var byTk = {};
   allCamps.forEach(function (c) { if (c && c.id && c._tk) (byTk[c._tk] = byTk[c._tk] || []).push(c); });
-  var rel = 'ads?fields=name,effective_status,issues_info,ad_review_feedback&effective_status=' + encodeURIComponent('["DISAPPROVED","WITH_ISSUES"]') + '&limit=100';
+  /* Puxa ATIVO + todos os status-PROBLEMA do Facebook (rejeitado, com problema/atualização necessária, em
+     análise, em processamento, pendência de pagamento). O ATIVO entra só p/ RESETAR o episódio quando o anúncio
+     volta a rodar (aí, se quebrar de novo, re-notifica). Escopo = por CAMPANHA (leve). */
+  var rel = 'ads?fields=name,effective_status,issues_info,ad_review_feedback&effective_status=' + encodeURIComponent('["ACTIVE","DISAPPROVED","WITH_ISSUES","PENDING_REVIEW","IN_PROCESS","PENDING_BILLING_INFO"]') + '&limit=100';
+  /* NÃO é problema: ativo, pausado (qualquer forma), arquivado/excluído, pré-aprovado. Qualquer outro = PROBLEMA. */
+  var NOTPROB = { 'ACTIVE': 1, 'PAUSED': 1, 'ADSET_PAUSED': 1, 'CAMPAIGN_PAUSED': 1, 'ARCHIVED': 1, 'DELETED': 1, 'PREAPPROVED': 1 };
   for (var tk in byTk) {
     var list = byTk[tk];
     for (var i = 0; i < list.length; i += 50) {
@@ -908,14 +913,15 @@ async function checkAdRejections(env, allCamps) {
           try { var b = JSON.parse(item.body); ads = b.data || []; } catch (e) {}
           ads.forEach(function (ad) {
             var st = (ad.effective_status || '').toUpperCase();
-            if (st !== 'DISAPPROVED' && st !== 'WITH_ISSUES') return;
+            if (st === 'ACTIVE') { actives.push(ad.id); return; } /* ativo -> reseta episódio */
+            if (NOTPROB[st]) return;                               /* pausado/arquivado -> ignora */
             out.push({ campId: camp.id, campName: camp.name || camp.id, adId: ad.id, adName: ad.name || ad.id, status: st, reason: adRejectReason(ad) });
           });
         });
       } catch (e) {}
     }
   }
-  return out;
+  return { problems: out, actives: actives };
 }
 
 /* ---------- execução principal ---------- */
@@ -1389,29 +1395,37 @@ async function run(env, opts) {
          se muda de WITH_ISSUES p/ DISAPPROVED nem se recupera e cai de novo). MERGE (mantém os antigos),
          então a consistência eventual do KV não re-notifica. Dedup também DENTRO do ciclo (seen) caso o
          mesmo adId volte 2x na varredura. Poda registros > 90 dias p/ não crescer sem fim. ── */
-      var rejList = await checkAdRejections(env, camps.concat(DAILY_CAMPS));
+      var rejRes = await checkAdRejections(env, camps.concat(DAILY_CAMPS));
+      var rejList = rejRes.problems || [];
+      var activeIds = rejRes.actives || [];
       DIAG.adRej = rejList.length;
       var rNotif = {}; try { var rs = await env.RULES_KV.get('adRejNotified'); if (rs) { var rj = JSON.parse(rs); if (rj && typeof rj === 'object') rNotif = rj; } } catch (e) {}
-      /* Migra registros da versão antiga (valor era o STATUS em texto) p/ timestamp — sem re-avisar na virada. */
-      Object.keys(rNotif).forEach(function (k) { if (typeof rNotif[k] !== 'number') rNotif[k] = nowT; });
-      var linesRej = [], rejDirty = false, seenRej = {};
+      var rejDirty = false;
+      /* EPISÓDIO: anúncio voltou a ATIVO -> limpa o registro. Se quebrar DE NOVO depois, re-notifica. */
+      activeIds.forEach(function (aid) { if (rNotif[aid] != null) { delete rNotif[aid]; rejDirty = true; } });
+      var STLABEL = { 'DISAPPROVED': 'REJEITADO', 'WITH_ISSUES': 'com problema (precisa atualizar)', 'PENDING_REVIEW': 'em análise', 'IN_PROCESS': 'em processamento', 'PENDING_BILLING_INFO': 'pendência de pagamento' };
+      var linesRej = [], seenRej = {};
       for (var rji = 0; rji < rejList.length; rji++) {
         var rd = rejList[rji];
         if (seenRej[rd.adId]) continue;        /* mesmo anúncio 2x no mesmo ciclo */
         seenRej[rd.adId] = true;
-        if (rNotif[rd.adId]) continue;          /* JÁ avisado alguma vez -> nunca repete */
-        rNotif[rd.adId] = nowT; rejDirty = true;
-        var stTxt = rd.status === 'DISAPPROVED' ? 'REJEITADO' : 'com problema (WITH_ISSUES)';
-        linesRej.push('• Campanha: ' + rd.campName + '\n   Anúncio: ' + rd.adName + '\n   Status: ' + stTxt + '\n   Motivo: ' + (rd.reason || '(não informado pela Meta)'));
+        var prev = rNotif[rd.adId];
+        /* NOTIFICA ao SAIR do ativo p/ um status-problema NOVO (ou ao MUDAR de status-problema). Mesmo status
+           já avisado neste episódio -> pula (não repete). */
+        if (prev && prev.st === rd.status) continue;
+        rNotif[rd.adId] = { st: rd.status, ts: nowT }; rejDirty = true;
+        var stTxt = STLABEL[rd.status] || rd.status;
+        linesRej.push('• Campanha: ' + rd.campName + '\n   Anúncio: ' + rd.adName + '\n   Status: SAIU DO ATIVO → ' + stTxt + '\n   Motivo: ' + (rd.reason || '(não informado pela Meta)'));
       }
       if (linesRej.length) {
         var showRej = linesRej.slice(0, 20);
         if (linesRej.length > 20) showRej.push('…e mais ' + (linesRej.length - 20) + ' anúncio(s).');
-        await sendTelegram(env, '\u{1F6D1} Anúncio(s) REJEITADO/DESATIVADO pela Meta — ' + linesRej.length + ' novo(s):\n\n' + showRej.join('\n\n'));
+        await sendTelegram(env, '\u{1F6D1} Anúncio(s) que SAÍRAM do ATIVO (problema da Meta) — ' + linesRej.length + ' novo(s):\n\n' + showRej.join('\n\n'));
       }
       if (rejDirty) {
-        var cutRej = nowT - 90 * 86400000; /* poda registros com mais de 90 dias */
-        var cleanRej = {}; Object.keys(rNotif).forEach(function (k) { if (typeof rNotif[k] === 'number' && rNotif[k] >= cutRej) cleanRej[k] = rNotif[k]; });
+        /* poda entradas órfãs > 30 dias (anúncio excluído que nunca voltou a ativo) p/ não crescer sem fim. */
+        var cutRej = nowT - 30 * 86400000;
+        var cleanRej = {}; Object.keys(rNotif).forEach(function (k) { var v = rNotif[k]; if (v && typeof v === 'object' && v.ts >= cutRej) cleanRej[k] = v; });
         try { await env.RULES_KV.put('adRejNotified', JSON.stringify(cleanRej)); } catch (e) {}
       }
     } catch (e) { DIAG.tgErr = String((e && e.message) || e); }
