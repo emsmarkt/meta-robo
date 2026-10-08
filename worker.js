@@ -1463,6 +1463,14 @@ export default {
       try { if (/%[0-9a-f]{2}/i.test(utmc)) utmc = decodeURIComponent(utmc); } catch (e) {} /* caso venha codificado (%7C) */
       utmc = utmc.replace(/%7C/ig, '|');
       var campId = (utmc.split('|').pop() || '').trim(); /* "NOME|ID" -> ID (último segmento); sem | -> usa tudo */
+      /* AD: utm_content vem "AD6|120254079166760154::...tail..." -> fica o ID (último |, antes do ::). Só vale se for numérico. */
+      var utmct = q.get('utm_content') || '';
+      try { if (/%[0-9a-f]{2}/i.test(utmct)) utmct = decodeURIComponent(utmct); } catch (e) {}
+      utmct = utmct.replace(/%7C/ig, '|');
+      var adId = ((utmct.split('|').pop() || '').split('::')[0] || '').trim();
+      if (!/^\d{6,}$/.test(adId)) adId = ''; /* só id de anúncio da Meta (numérico); senão deixa vazio */
+      /* PAÍS: Cartpanda manda {country} (ex. "US"/"BR"). JVZoo às vezes manda country/ccountry. Normaliza em maiúsculas. */
+      var co = (q.get('country') || q.get('ccountry') || q.get('cntry') || '').toString().trim().toUpperCase().slice(0, 4);
       /* VALOR = COMISSÃO DO AFILIADO (o usuário é afiliado): JVZoo `affiliate_amount`, Cartpanda `amount_affiliate`.
          `amount` é o que as URLs de postback mandam (já apontando pro macro do afiliado). Totais só como fallback. */
       var amount = parseFloat(q.get('amount') || q.get('affiliate_amount') || q.get('amount_affiliate') || q.get('payout') || q.get('transaction_amount') || q.get('total_price') || q.get('amount_net') || '0') || 0;
@@ -1476,9 +1484,12 @@ export default {
         /* data: hoje (BR) por padrão; backfill pode mandar ?day=YYYY-MM-DD p/ a data histórica da venda. */
         var day = /^\d{4}-\d{2}-\d{2}$/.test(q.get('day') || '') ? q.get('day') : brDatePlus(0);
         var amt = refund ? -Math.abs(amount) : amount;
-        var rec = { camp: campId, amt: amt, cur: cur, type: type, plat: plat, refund: refund, utmc: utmc, sale: saleId, ts: Date.now() };
+        var rec = { camp: campId, amt: amt, cur: cur, type: type, plat: plat, refund: refund, utmc: utmc, utmct: utmct, ad: adId, co: co, sale: saleId, ts: Date.now() };
         var key = 'pbsale:' + day + ':' + saleId + ':' + (refund ? 'r' : 's');
-        try { await env.RULES_KV.put(key, JSON.stringify(rec), { expirationTtl: 70 * 86400, metadata: { c: campId, a: amt, r: refund ? 1 : 0 } }); } catch (e) {}
+        var md = { c: campId, a: amt, r: refund ? 1 : 0 }; /* metadata leve p/ leitura rápida */
+        if (adId) md.ad = adId;
+        if (co) md.co = co;
+        try { await env.RULES_KV.put(key, JSON.stringify(rec), { expirationTtl: 70 * 86400, metadata: md }); } catch (e) {}
       }
       return new Response('OK', { headers: CORS }); /* JVZoo/Cartpanda só querem um 200 */
     }
@@ -1506,6 +1517,69 @@ export default {
         } while (cursor);
       }
       return jsonResp({ byCamp: byCamp, days: days.length });
+    }
+    /* BREAKDOWN por AD e por PAÍS (Dash 2 detalha): ?camp=<id>&since=&until=. Usa metadata {ad,co}.
+       So registros com ad/co (postback novo, ou backfill re-enviado com utm_content/country). Devolve { byAd, byCountry }. */
+    if (path === '/pbbreak') {
+      var bcamp = (_u.searchParams.get('camp') || '').trim();
+      var bsince = _u.searchParams.get('since') || brDatePlus(0);
+      var buntil = _u.searchParams.get('until') || bsince;
+      var bdays = [];
+      var b0 = Date.parse(bsince + 'T00:00:00Z'), b1 = Date.parse(buntil + 'T00:00:00Z');
+      if (isFinite(b0) && isFinite(b1) && b1 >= b0 && (b1 - b0) <= 370 * 86400000) { for (var bt = b0; bt <= b1; bt += 86400000) bdays.push(new Date(bt).toISOString().slice(0, 10)); } else bdays = [bsince];
+      var byAd = {}, byCountry = {};
+      for (var bi = 0; bi < bdays.length; bi++) {
+        var bcur = undefined;
+        do {
+          var blst = await env.RULES_KV.list({ prefix: 'pbsale:' + bdays[bi] + ':', cursor: bcur, limit: 1000 });
+          (blst.keys || []).forEach(function (kk) {
+            var m = kk.metadata || {};
+            if (bcamp && String(m.c) !== String(bcamp)) return;
+            var inc = m.r ? -1 : 1, rv = (parseFloat(m.a) || 0);
+            if (m.ad) { if (!byAd[m.ad]) byAd[m.ad] = { sales: 0, revenue: 0 }; byAd[m.ad].sales += inc; byAd[m.ad].revenue += rv; }
+            if (m.co) { if (!byCountry[m.co]) byCountry[m.co] = { sales: 0, revenue: 0 }; byCountry[m.co].sales += inc; byCountry[m.co].revenue += rv; }
+          });
+          bcur = blst.list_complete ? null : blst.cursor;
+        } while (bcur);
+      }
+      return jsonResp({ byAd: byAd, byCountry: byCountry, days: bdays.length });
+    }
+    /* IC (clique no botão da VSL) direto da VTURB, por AD (utm_content). O Meta às vezes não marca IC;
+       a VTurb marca o clique no botão. Soma `total_clicked` de TODOS os vídeos, agrupado por utm_content,
+       e extrai o adId. Precisa do secret env.VTURB_TOKEN. Cacheia 10min no KV (rate limit da VTurb). */
+    if (path === '/vturbic') {
+      if (!env.VTURB_TOKEN) return jsonResp({ byAd: {}, err: 'sem VTURB_TOKEN' });
+      var vsin = (_u.searchParams.get('since') || brDatePlus(0)) + ' 00:00:00';
+      var vunt = (_u.searchParams.get('until') || brDatePlus(0)) + ' 23:59:59';
+      var vck = 'vturbic:' + vsin + ':' + vunt;
+      try { var cached = await env.RULES_KV.get(vck); if (cached) return jsonResp(JSON.parse(cached)); } catch (e) {}
+      var VH = { 'X-Api-Token': env.VTURB_TOKEN, 'X-Api-Version': 'v1', 'Content-Type': 'application/json' };
+      var byAdV = {};
+      try {
+        var plr = await fetch('https://analytics.vturb.net/players/list?start_date=' + encodeURIComponent(vsin) + '&end_date=' + encodeURIComponent(vunt) + '&timezone=America/Sao_Paulo', { headers: VH });
+        var players = await plr.json();
+        if (!Array.isArray(players)) players = [];
+        for (var pi = 0; pi < players.length; pi++) {
+          var pl = players[pi];
+          try {
+            var sres = await fetch('https://analytics.vturb.net/traffic_origin/stats', { method: 'POST', headers: VH, body: JSON.stringify({ player_id: pl.id, start_date: vsin, end_date: vunt, timezone: 'America/Sao_Paulo', query_key: 'utm_content', video_duration: pl.duration, pitch_time: pl.pitch_time }) });
+            var rowsV = await sres.json();
+            if (!Array.isArray(rowsV)) continue;
+            rowsV.forEach(function (rw) {
+              var gf = String(rw.grouped_field || '');
+              var aid = (gf.split('|').pop() || '').split('::')[0].trim();
+              if (!/^\d{6,}$/.test(aid)) return;
+              if (!byAdV[aid]) byAdV[aid] = { clicks: 0, conv: 0, usd: 0 };
+              byAdV[aid].clicks += (parseInt(rw.total_clicked) || 0);
+              byAdV[aid].conv += (parseInt(rw.total_conversions) || 0);
+              byAdV[aid].usd += (parseFloat(rw.total_amount_usd) || 0) / 100; /* vem em centavos */
+            });
+          } catch (e) {}
+        }
+      } catch (e) { return jsonResp({ byAd: {}, err: 'vturb falhou' }); }
+      var outV = { byAd: byAdV, players: (players || []).length };
+      try { await env.RULES_KV.put(vck, JSON.stringify(outV), { expirationTtl: 600 }); } catch (e) {}
+      return jsonResp(outV);
     }
 
     /* INTERRUPTOR LIVE/DRY do robo (KV `applyMode`). O dashboard le (GET) e liga/desliga (POST {mode}).
