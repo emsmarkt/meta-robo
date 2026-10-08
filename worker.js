@@ -1451,6 +1451,58 @@ export default {
     var path = _u.pathname;
     if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
 
+    /* ========== POSTBACK DE VENDAS (Dash 2 — JVZoo + Cartpanda) ==========
+       RECEPTOR: JVZoo/Cartpanda disparam aqui (GET) a cada venda. Pega a CAMPANHA do utm_campaign (vem "NOME|ID"
+       -> fica o ID depois do último |), o VALOR, o ID da venda e o TIPO. Guarda em KV `pbsale:<diaBR>:<saleId>:<s|r>`
+       (dedup por id de venda; refund/chargeback entra NEGATIVO). Ignora pedido de teste. Metadata leve p/ leitura
+       rápida (sem 1 GET por chave). Opcional: se env.PB_KEY existir, exige ?k=<PB_KEY>. */
+    if (path === '/pb' || path.indexOf('/pb/') === 0) {
+      var q = _u.searchParams;
+      if (env.PB_KEY && q.get('k') !== env.PB_KEY && path.indexOf('/pb/' + env.PB_KEY) !== 0) return new Response('forbidden', { status: 403, headers: CORS });
+      var utmc = q.get('utm_campaign') || '';
+      var campId = utmc.indexOf('|') >= 0 ? utmc.split('|').pop().trim() : utmc.trim();
+      var amount = parseFloat(q.get('total_price') || q.get('transaction_amount') || q.get('amount_net') || q.get('amount') || '0') || 0;
+      var saleId = (q.get('order_id') || q.get('transaction_id') || q.get('txn') || q.get('random') || ('t' + Date.now())).toString();
+      var type = (q.get('order_type') || q.get('transaction_type') || q.get('type') || 'sale').toLowerCase();
+      var plat = (q.get('plat') || q.get('src') || (path.split('/')[2] || '')).toString();
+      var cur = (q.get('currency') || 'USD').toString();
+      var isTest = (q.get('is_test') || '').toString();
+      var refund = /refund|chargeback|rfnd|cgbk|estorn|reembols|cancel|dispute|charge_back/.test(type);
+      if (!/^(1|true|yes|sim)$/i.test(isTest)) {
+        var day = brDatePlus(0);
+        var amt = refund ? -Math.abs(amount) : amount;
+        var rec = { camp: campId, amt: amt, cur: cur, type: type, plat: plat, refund: refund, utmc: utmc, sale: saleId, ts: Date.now() };
+        var key = 'pbsale:' + day + ':' + saleId + ':' + (refund ? 'r' : 's');
+        try { await env.RULES_KV.put(key, JSON.stringify(rec), { expirationTtl: 70 * 86400, metadata: { c: campId, a: amt, r: refund ? 1 : 0 } }); } catch (e) {}
+      }
+      return new Response('OK', { headers: CORS }); /* JVZoo/Cartpanda só querem um 200 */
+    }
+    /* LEITURA (Dash 2 lê): agrega as vendas por CAMPANHA no período. ?since=YYYY-MM-DD&until=YYYY-MM-DD (dia BR).
+       Devolve { byCamp: { campId: { sales, revenue } } }. Usa a metadata do list (sem 1 GET por venda). */
+    if (path === '/pbsales') {
+      var since = _u.searchParams.get('since') || brDatePlus(0);
+      var until = _u.searchParams.get('until') || since;
+      var days = [];
+      var d0 = Date.parse(since + 'T00:00:00Z'), d1 = Date.parse(until + 'T00:00:00Z');
+      if (isFinite(d0) && isFinite(d1) && d1 >= d0 && (d1 - d0) <= 370 * 86400000) { for (var tt = d0; tt <= d1; tt += 86400000) days.push(new Date(tt).toISOString().slice(0, 10)); } else days = [since];
+      var byCamp = {};
+      for (var di = 0; di < days.length; di++) {
+        var cursor = undefined;
+        do {
+          var lst = await env.RULES_KV.list({ prefix: 'pbsale:' + days[di] + ':', cursor: cursor, limit: 1000 });
+          (lst.keys || []).forEach(function (kk) {
+            var md = kk.metadata || {};
+            var c = (md.c != null && md.c !== '') ? md.c : '(sem campanha)';
+            if (!byCamp[c]) byCamp[c] = { sales: 0, revenue: 0 };
+            byCamp[c].revenue += (parseFloat(md.a) || 0);
+            byCamp[c].sales += (md.r ? -1 : 1);
+          });
+          cursor = lst.list_complete ? null : lst.cursor;
+        } while (cursor);
+      }
+      return jsonResp({ byCamp: byCamp, days: days.length });
+    }
+
     /* INTERRUPTOR LIVE/DRY do robo (KV `applyMode`). O dashboard le (GET) e liga/desliga (POST {mode}).
        Esta chave VENCE o env/wrangler no run(), entao sobrevive a deploy. GET tambem devolve o default do env. */
     if (path === '/applymode') {
