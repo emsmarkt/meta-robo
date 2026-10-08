@@ -1460,16 +1460,21 @@ export default {
       var q = _u.searchParams;
       if (env.PB_KEY && q.get('k') !== env.PB_KEY && path.indexOf('/pb/' + env.PB_KEY) !== 0) return new Response('forbidden', { status: 403, headers: CORS });
       var utmc = q.get('utm_campaign') || '';
-      var campId = utmc.indexOf('|') >= 0 ? utmc.split('|').pop().trim() : utmc.trim();
-      var amount = parseFloat(q.get('total_price') || q.get('transaction_amount') || q.get('amount_net') || q.get('amount') || '0') || 0;
-      var saleId = (q.get('order_id') || q.get('transaction_id') || q.get('txn') || q.get('random') || ('t' + Date.now())).toString();
+      try { if (/%[0-9a-f]{2}/i.test(utmc)) utmc = decodeURIComponent(utmc); } catch (e) {} /* caso venha codificado (%7C) */
+      utmc = utmc.replace(/%7C/ig, '|');
+      var campId = (utmc.split('|').pop() || '').trim(); /* "NOME|ID" -> ID (último segmento); sem | -> usa tudo */
+      /* VALOR = COMISSÃO DO AFILIADO (o usuário é afiliado): JVZoo `affiliate_amount`, Cartpanda `amount_affiliate`.
+         `amount` é o que as URLs de postback mandam (já apontando pro macro do afiliado). Totais só como fallback. */
+      var amount = parseFloat(q.get('amount') || q.get('affiliate_amount') || q.get('amount_affiliate') || q.get('payout') || q.get('transaction_amount') || q.get('total_price') || q.get('amount_net') || '0') || 0;
+      var saleId = (q.get('order_id') || q.get('transaction_id') || q.get('pay_key') || q.get('txn') || q.get('random') || ('t' + Date.now())).toString();
       var type = (q.get('order_type') || q.get('transaction_type') || q.get('type') || 'sale').toLowerCase();
       var plat = (q.get('plat') || q.get('src') || (path.split('/')[2] || '')).toString();
       var cur = (q.get('currency') || 'USD').toString();
       var isTest = (q.get('is_test') || '').toString();
       var refund = /refund|chargeback|rfnd|cgbk|estorn|reembols|cancel|dispute|charge_back/.test(type);
       if (!/^(1|true|yes|sim)$/i.test(isTest)) {
-        var day = brDatePlus(0);
+        /* data: hoje (BR) por padrão; backfill pode mandar ?day=YYYY-MM-DD p/ a data histórica da venda. */
+        var day = /^\d{4}-\d{2}-\d{2}$/.test(q.get('day') || '') ? q.get('day') : brDatePlus(0);
         var amt = refund ? -Math.abs(amount) : amount;
         var rec = { camp: campId, amt: amt, cur: cur, type: type, plat: plat, refund: refund, utmc: utmc, sale: saleId, ts: Date.now() };
         var key = 'pbsale:' + day + ':' + saleId + ':' + (refund ? 'r' : 's');
