@@ -1444,9 +1444,29 @@ async function run(env, opts) {
 var CORS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,POST,OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' };
 function jsonResp(obj) { return new Response(JSON.stringify(obj), { headers: Object.assign({ 'content-type': 'application/json' }, CORS) }); }
 
+/* Encaminha UMA venda pro UTMify 2 (Dash 2). Token vem do KV `utmify2_token` (não é var, p/ não estourar o limite
+   de 64 vars do worker). Só JVZoo. Atribui campanha/conjunto/anúncio pelos utm_*. Falha silenciosa (não trava o postback). */
+async function forwardUtmify(env, p) {
+  var tok; try { tok = await env.RULES_KV.get('utmify2_token'); } catch (e) {}
+  if (!tok) return;
+  var cents = Math.round(Math.abs(p.amt || 0) * 100);
+  var mail = (String(p.saleId || '').replace(/[^A-Za-z0-9]/g, '').toLowerCase() || ('jv' + Date.now())) + '@jvzoo.sale';
+  var payload = {
+    orderId: String(p.saleId), platform: 'JVZoo', paymentMethod: 'credit_card',
+    status: p.refund ? 'refunded' : 'paid',
+    createdAt: p.createdAt, approvedDate: p.refund ? null : p.createdAt, refundedAt: p.refund ? p.createdAt : null,
+    customer: { name: 'Cliente JVZoo', email: mail, phone: null, document: null, country: 'US' },
+    products: [{ id: 'jvzoo', name: (p.prod || 'JVZoo'), planId: null, planName: null, quantity: 1, priceInCents: cents }],
+    trackingParameters: { src: p.src || null, sck: null, utm_source: p.utmSrc || null, utm_campaign: p.utmc || null, utm_medium: p.utmMed || null, utm_content: p.utmct || null, utm_term: p.utmTerm || null },
+    commission: { totalPriceInCents: cents, gatewayFeeInCents: 0, userCommissionInCents: cents, currency: (p.cur || 'USD') },
+    isTest: false
+  };
+  try { await fetch('https://api.utmify.com.br/api-credentials/orders', { method: 'POST', headers: { 'x-api-token': tok, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); } catch (e) {}
+}
+
 export default {
   async scheduled(event, env, ctx) { ctx.waitUntil(run(env)); },
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     var _u = new URL(request.url);
     var path = _u.pathname;
     if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
@@ -1480,6 +1500,12 @@ export default {
       var cur = (q.get('currency') || 'USD').toString();
       var isTest = (q.get('is_test') || '').toString();
       var refund = /refund|chargeback|rfnd|cgbk|estorn|reembols|cancel|dispute|charge_back/.test(type);
+      /* Campos extras p/ UTMify (atribuição por conjunto/anúncio): conjunto=utm_medium, origem=utm_source, termo, src, produto. */
+      var utmMed = (q.get('utm_medium') || '').toString();
+      var utmSrc = (q.get('utm_source') || 'FB').toString();
+      var utmTerm = (q.get('utm_term') || '').toString();
+      var srcv = (q.get('srcv') || q.get('vtid') || '').toString(); /* `src` puro é usado p/ `plat`; aqui pego srcv/vtid */
+      var prodName = (q.get('product') || q.get('product_name') || '').toString();
       if (!/^(1|true|yes|sim)$/i.test(isTest)) {
         /* data: hoje (BR) por padrão; backfill pode mandar ?day=YYYY-MM-DD p/ a data histórica da venda. */
         var day = /^\d{4}-\d{2}-\d{2}$/.test(q.get('day') || '') ? q.get('day') : brDatePlus(0);
@@ -1490,6 +1516,14 @@ export default {
         if (adId) md.ad = adId;
         if (co) md.co = co;
         try { await env.RULES_KV.put(key, JSON.stringify(rec), { expirationTtl: 70 * 86400, metadata: md }); } catch (e) {}
+        /* ENCAMINHA AO VIVO p/ UTMify 2 — SÓ JVZoo (Dash 2). Cartpanda NÃO (já tem UTMify própria/integração). */
+        if (/jvzoo/i.test(plat)) {
+          var nowBR = new Date(Date.now() - 3 * 3600000).toISOString().slice(0, 19).replace('T', ' '); /* data/hora BR p/ createdAt */
+          ctx.waitUntil(forwardUtmify(env, {
+            saleId: saleId, refund: refund, amt: amt, cur: cur, prod: prodName,
+            src: srcv, utmSrc: utmSrc, utmc: utmc, utmMed: utmMed, utmct: utmct, utmTerm: utmTerm, createdAt: nowBR
+          }));
+        }
       }
       return new Response('OK', { headers: CORS }); /* JVZoo/Cartpanda só querem um 200 */
     }
