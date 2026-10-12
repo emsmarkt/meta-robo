@@ -21,14 +21,14 @@ id = "62fa6d5180d6403f81a5485e1e77d5ea"
 [vars]
 # APPLY_MODE aqui e so o DEFAULT inicial. O interruptor LIVE/DRY do dashboard grava a chave KV
 # `applyMode`, que VENCE este valor no run() — entao o modo sobrevive a deploy (nao reverte mais).
-APPLY_MODE = "live"
+APPLY_MODE = "dry"
 RT_PTYPE = "1"
 RT_ICTYPE = "2"
 
 # ----- Parametros das REGRAS (edite aqui ou no painel do Cloudflare; tudo em texto) -----
 R_DAYGOOD = "1.6"      # humor do dia: ROAS combinado >= isso = dia BOM
 R_DAYOK = "1.2"        # entre R_DAYOK e R_DAYGOOD = NORMAL; abaixo = RUIM
-R_MINSPEND = "100"     # (reservado)
+# R_MINSPEND removido p/ liberar slot (limite 64 vars no plano Free) — code usa default 100
 R_FLOOR = "85"         # piso de orcamento diario (US$) — valor do CORTAR
 R_CUTDAYS = "364"      # CORTAR empurra o termino p/ daqui X dias (limite FB e 365)
 R_COOLDOWN = "5"       # minutos entre 2 aplicacoes na MESMA campanha (5 = reage a cada ciclo do cron)
@@ -84,8 +84,7 @@ R_EXCMINSALES = "3"    # ... com pelo menos N vendas -> escalar
 R_SCALEMULT = "12"     # multiplicador de escala (12x o gasto de hoje; range util 10-15)
 R_AUMROASLOW = "1.5"   # faixa ROAS bom: inicio
 R_AUMROASHIGH = "1.9"  # faixa ROAS bom: fim
-R_AUMPCTLOW = "0.30"   # +30% no ROAS 1.5 (regra antiga de AUMENTAR — nao usada mais)
-R_AUMPCTHIGH = "0.70"  # +70% no ROAS 1.9 (regra antiga de AUMENTAR — nao usada mais)
+# R_AUMPCTLOW / R_AUMPCTHIGH removidos p/ liberar slots (regra antiga, não usada; code usa defaults 0.30/0.70)
 # AUMENTAR (so SUGESTAO, robo nao aplica): so apos R_AUMHOURBR h BR, ROAS de hoje >= R_PAUSEROAS(1,5)
 # E ROAS dos ultimos 7 dias > R_AUMROAS7D -> sugere subir o diario p/ R_AUMMULT x o atual.
 R_AUMHOURBR = "20"     # so aparece depois dessa hora BR
