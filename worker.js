@@ -1552,6 +1552,17 @@ export default {
       }
       return jsonResp({ byCamp: byCamp, days: days.length });
     }
+    /* DIAGNÓSTICO do encaminhamento UTMify: diz se ESTE worker tem o código novo (codeVersion), se o token
+       está no KV (utmify2_token) e, com ?post=1, faz um POST isTest na UTMify e devolve a resposta dela. */
+    if (path === '/pbdiag') {
+      var dtok = null; try { dtok = await env.RULES_KV.get('utmify2_token'); } catch (e) {}
+      var utmifyTest = 'skip (use ?post=1)';
+      if (dtok && _u.searchParams.get('post') === '1') {
+        var dp = { orderId: 'PBDIAG-' + Date.now(), platform: 'JVZoo', paymentMethod: 'credit_card', status: 'paid', createdAt: '2026-10-12 12:00:00', approvedDate: '2026-10-12 12:00:00', refundedAt: null, customer: { name: 'PBDIAG', email: 'pbdiag@jvzoo.sale', phone: null, document: null, country: 'US' }, products: [{ id: 'x', name: 'PBDIAG', planId: null, planName: null, quantity: 1, priceInCents: 100 }], trackingParameters: { src: null, sck: null, utm_source: 'FB', utm_campaign: 'DIAG|999', utm_medium: 'CJ|999', utm_content: 'AD|999', utm_term: 'x' }, commission: { totalPriceInCents: 100, gatewayFeeInCents: 0, userCommissionInCents: 100, currency: 'USD' }, isTest: true };
+        try { var dr = await fetch('https://api.utmify.com.br/api-credentials/orders', { method: 'POST', headers: { 'x-api-token': dtok, 'Content-Type': 'application/json' }, body: JSON.stringify(dp) }); utmifyTest = dr.status + ' ' + (await dr.text()); } catch (e) { utmifyTest = 'ERR ' + (e && e.message); }
+      }
+      return jsonResp({ codeVersion: 'fwd-v1', utmifyTokenInKV: !!dtok, tokenLen: dtok ? dtok.length : 0, utmifyTest: utmifyTest });
+    }
     /* BREAKDOWN por AD e por PAÍS (Dash 2 detalha): ?camp=<id>&since=&until=. Usa metadata {ad,co}.
        So registros com ad/co (postback novo, ou backfill re-enviado com utm_content/country). Devolve { byAd, byCountry }. */
     if (path === '/pbbreak') {
