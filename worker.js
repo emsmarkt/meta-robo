@@ -44,7 +44,8 @@ var RULES = {
   limMinSpend: 1, // SO limita por ROAS se gasto > isso. Evita o falso ROAS 0 na virada (venda sincroniza antes do gasto).
   remLimRoas: 1.5, remLimStart: 10, remLimEnd: 23, // robo REMOVE o limite sozinho se ROAS > 1,5 entre remLimStart(10h) e remLimEnd(23h) BR (campanha recuperou).
   pauseRoas: 1.5, escRoas: 1.7, escPct: 0.20, pauseSalesBreak: 3, // ACOMPANHAR enquanto 1,3 < ROAS < 1,5 (01/10). escRoas (reativa/AUMENTA) segue 1,7
-  critRoas: 1.3, critMinSpend: 50, // 🔴 ROAS CRÍTICO (02/10): campanha ATIVA, gasto > critMinSpend($50), ROAS <= 1,3 -> aviso Telegram + visual, INDEPENDENTE do nº de vendas
+  critRoas: 1.4, critMinSpend: 50, critMinSales: 2, // 🔴 ROAS CRÍTICO (30/10): campanha ATIVA, gasto > critMinSpend($50), ROAS < 1,4 E >= critMinSales(2) vendas -> aviso Telegram + visual. SEM venda NÃO entra aqui (vai p/ noSaleSpend).
+  noSaleSpend: 80, // 🛑 SEM VENDA (30/10): campanha ATIVA, 0 venda e gasto >= $80 -> aviso Telegram p/ PAUSAR/analisar.
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
   /* AUMENTAR (so SUGESTAO): so apos aumHourBR(20h) BR, ROAS de HOJE >= pauseRoas(1,5) E ROAS dos ult. 7 dias > aumRoas7dMin(1,4) -> subir o diario p/ aumMult(1,5)x o atual.
@@ -78,7 +79,7 @@ function buildRules(env) {
     restoreRoas: n('R_RESTOREROAS', 1.5),
     dailyAlertSpend: n('R_DAILYSPEND', 100), dailyAlertCpc: n('R_DAILYCPC', 2), dailyAlertCpi: n('R_DAILYCPI', 55),
     pauseRoas: n('R_PAUSEROAS', 1.5), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
-    critRoas: n('R_CRITROAS', 1.3), critMinSpend: n('R_CRITMINSPEND', 50),
+    critRoas: n('R_CRITROAS', 1.4), critMinSpend: n('R_CRITMINSPEND', 50), critMinSales: n('R_CRITMINSALES', 2), noSaleSpend: n('R_NOSALESPEND', 80),
     limSpendTrigger: n('R_LIMTRIG', 90), limSpendCap: n('R_LIMCAP', 120),
     limRoas: n('R_LIMROAS', 1.5), limMinSpend: n('R_LIMMINSPEND', 1),
     remLimRoas: n('R_REMLIMROAS', 1.5), remLimStart: n('R_REMLIMSTART', 10), remLimEnd: n('R_REMLIMEND', 23),
@@ -246,7 +247,7 @@ function suggestRule(c, mood) {
      pausa). Unificado em 01/10 (pedido do usuário): antes dividia em CORTAR(<1,4)+PAUSAR(1,4–1,7); agora avisa
      SÓ quando ROAS < 1,5, sem zona silenciosa. SEM venda (sales==0) segue no CORTAR lá em cima (sem alerta). */
   if (sales < RULES.aumMaxSales && sp > RULES.limMinSpend) {
-    if (roas < RULES.pauseRoas && roas > RULES.critRoas) return { action: 'ROAS baixo — ACOMPANHAR (ROAS ' + roas.toFixed(2) + ' < ' + RULES.pauseRoas + ', ' + sales + ' venda). Avalie limitar no dash — o robô NÃO pausa.', key: 'PAUSAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp }; /* ROAS <= critRoas(1,3) cai no alerta CRÍTICO separado (independe de vendas) */
+    if (roas < RULES.pauseRoas && roas > RULES.critRoas) return { action: 'ROAS baixo — ACOMPANHAR (ROAS ' + roas.toFixed(2) + ' < ' + RULES.pauseRoas + ', ' + sales + ' venda). Avalie limitar no dash — o robô NÃO pausa.', key: 'PAUSAR', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp }; /* ACOMPANHAR = 1,4 < ROAS < 1,5. ROAS <= critRoas(1,4) com >=2 vendas cai no alerta CRÍTICO separado */
   }
   /* CAMPEA: >= aumMaxSales(5) vendas -> NUNCA corta (gestao manual, robo nao freia). Escala se ROAS alto. */
   if (sales > RULES.aumMaxSales) return { action: 'MANTER (>' + RULES.aumMaxSales + ' vendas, ROAS ' + roas.toFixed(2) + ' — gestao manual)', key: 'MANTER', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
@@ -254,31 +255,34 @@ function suggestRule(c, mood) {
   return { action: 'MANTER (ROAS ' + roas.toFixed(2) + ', mantem orcamento)', key: 'MANTER', target: null, newEnd: null, cpa: isFinite(cpa) ? cpa : null, roas: roas, sales: sales, spend: sp };
 }
 
-/* Busca o gasto vitalicio de varias campanhas em 1 chamada por token (Meta Batch API).
-   Cada batch (ate 50 ops) conta como 1 subrequest do Worker. */
+/* Busca o gasto vitalicio NO NÍVEL DA CONTA (level=campaign): 1 chamada POR CONTA (nao por campanha).
+   Isso derruba as chamadas de ~N campanhas p/ ~1 por conta -> evita o #17 "User request limit reached".
+   Varias contas vao no mesmo Batch (cada subrequest conta contra a SUA conta). */
 async function batchLifetimeSpend(camps, lifeRange) {
+  camps.forEach(function (c) { c._spend = 0; });
+  var acctTk = {};
+  camps.forEach(function (c) { if (c._acctId) acctTk[c._acctId] = c._tk; });
   var byTk = {};
-  camps.forEach(function (c) { (byTk[c._tk] = byTk[c._tk] || []).push(c); });
+  Object.keys(acctTk).forEach(function (aid) { (byTk[acctTk[aid]] = byTk[acctTk[aid]] || []).push(aid); });
+  var spendByCamp = {};
   for (var tk in byTk) {
-    var list = byTk[tk];
-    for (var i = 0; i < list.length; i += 50) {
-      var chunk = list.slice(i, i + 50);
-      var batch = chunk.map(function (c) { return { method: 'GET', relative_url: c.id + '/insights?fields=spend&time_range=' + lifeRange }; });
+    var accts = byTk[tk];
+    for (var i = 0; i < accts.length; i += 50) {
+      var chunk = accts.slice(i, i + 50);
+      var batch = chunk.map(function (aid) { return { method: 'GET', relative_url: aid + '/insights?level=campaign&fields=campaign_id,spend&time_range=' + lifeRange + '&limit=500' }; });
       var body = new URLSearchParams();
       body.append('batch', JSON.stringify(batch));
       body.append('access_token', tk);
       try {
         var resp = await fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() });
         var arr = await resp.json();
-        if (Array.isArray(arr)) {
-          arr.forEach(function (item, idx) {
-            var c = chunk[idx];
-            try { var b = JSON.parse(item.body); c._spend = (b.data && b.data[0]) ? parseFloat(b.data[0].spend) || 0 : 0; } catch (e) { c._spend = 0; }
-          });
-        }
-      } catch (e) { chunk.forEach(function (c) { c._spend = 0; }); }
+        if (Array.isArray(arr)) arr.forEach(function (item) {
+          try { var b = JSON.parse(item.body); (b.data || []).forEach(function (row) { if (row.campaign_id != null) spendByCamp[String(row.campaign_id)] = parseFloat(row.spend) || 0; }); } catch (e) {}
+        });
+      } catch (e) {}
     }
   }
+  camps.forEach(function (c) { if (spendByCamp[String(c.id)] != null) c._spend = spendByCamp[String(c.id)]; });
 }
 
 /* GASTO de HOJE + cliques no LINK de hoje, por campanha (Meta Batch API, date_preset=today).
@@ -301,48 +305,59 @@ function sumBrDayHourly(rows, brDate, offsetHours) {
 }
 
 async function batchTodayMeta(camps) {
-  var byTk = {};
-  camps.forEach(function (c) { c._metaToday = 0; c._metaLinkClicks = 0; (byTk[c._tk] = byTk[c._tk] || []).push(c); });
+  camps.forEach(function (c) { c._metaToday = 0; c._metaLinkClicks = 0; });
   var brToday = brDatePlus(0);
-  /* Fuso BR: gasto de MEIA-NOITE BR ate 23:59 BR = 1 dia. */
   var todayRange = encodeURIComponent(JSON.stringify({ since: brToday, until: brToday }));
-  /* Metodo por HORA (contas fora de UTC-3): janela ampla D-1..D+1 no fuso da conta cobre o dia BR em qualquer fuso. */
   var wideRange = encodeURIComponent(JSON.stringify({ since: brDatePlus(-1), until: brDatePlus(1) }));
-  /* -3 = Brasilia; offset null/indefinido -> trata como BR (padrao antigo, seguro). */
-  var isBrTz = function (c) { var o = c._acctOffset; return o == null || Number(o) === -3; };
-  for (var tk in byTk) {
-    var list = byTk[tk];
-    var brC = list.filter(isBrTz);
-    var offC = list.filter(function (c) { return !isBrTz(c); });
-    /* 1) contas em BR (ou fuso desconhecido): time_range com a data BR (a Meta le no fuso da conta = BR -> bate). */
-    for (var i = 0; i < brC.length; i += 50) {
-      var chunk = brC.slice(i, i + 50);
-      var batch = chunk.map(function (c) { return { method: 'GET', relative_url: c.id + '/insights?fields=spend,inline_link_clicks&time_range=' + todayRange }; });
+  var isBrTz = function (o) { return o == null || Number(o) === -3; };
+  /* NÍVEL DA CONTA (level=campaign): 1 chamada por conta. Agrupa contas por token + fuso. */
+  var acct = {};
+  camps.forEach(function (c) { if (c._acctId) acct[c._acctId] = { tk: c._tk, off: c._acctOffset }; });
+  var brByTk = {}, offByTk = {};
+  Object.keys(acct).forEach(function (aid) {
+    var a = acct[aid];
+    if (isBrTz(a.off)) (brByTk[a.tk] = brByTk[a.tk] || []).push(aid);
+    else (offByTk[a.tk] = offByTk[a.tk] || []).push({ aid: aid, off: a.off });
+  });
+  var tByCamp = {}; /* campaign_id -> {spend, clicks} */
+  /* 1) contas BR (ou fuso desconhecido): insight da conta na data BR. */
+  for (var tk in brByTk) {
+    var accts = brByTk[tk];
+    for (var i = 0; i < accts.length; i += 50) {
+      var chunk = accts.slice(i, i + 50);
+      var batch = chunk.map(function (aid) { return { method: 'GET', relative_url: aid + '/insights?level=campaign&fields=campaign_id,spend,inline_link_clicks&time_range=' + todayRange + '&limit=500' }; });
       var body = new URLSearchParams(); body.append('batch', JSON.stringify(batch)); body.append('access_token', tk);
       try {
         var resp = await fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() });
         var arr = await resp.json();
-        if (Array.isArray(arr)) arr.forEach(function (item, idx) {
-          var c = chunk[idx];
-          try { var b = JSON.parse(item.body); var d0 = (b.data && b.data[0]) || null; c._metaToday = d0 ? (parseFloat(d0.spend) || 0) : 0; c._metaLinkClicks = d0 ? (parseInt(d0.inline_link_clicks) || 0) : 0; } catch (e) {}
-        });
-      } catch (e) {}
-    }
-    /* 2) contas em OUTRO fuso: breakdown por HORA no fuso da conta -> soma so as horas que caem no dia BR. */
-    for (var k = 0; k < offC.length; k += 50) {
-      var chunkO = offC.slice(k, k + 50);
-      var batchO = chunkO.map(function (c) { return { method: 'GET', relative_url: c.id + '/insights?fields=spend,inline_link_clicks&time_increment=1&breakdowns=hourly_stats_aggregated_by_advertiser_time_zone&time_range=' + wideRange }; });
-      var bodyO = new URLSearchParams(); bodyO.append('batch', JSON.stringify(batchO)); bodyO.append('access_token', tk);
-      try {
-        var respO = await fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: bodyO.toString() });
-        var arrO = await respO.json();
-        if (Array.isArray(arrO)) arrO.forEach(function (item, idx) {
-          var c = chunkO[idx];
-          try { var b = JSON.parse(item.body); var agg = sumBrDayHourly((b.data) || [], brToday, Number(c._acctOffset)); c._metaToday = agg.spend; c._metaLinkClicks = agg.clicks; } catch (e) {}
+        if (Array.isArray(arr)) arr.forEach(function (item) {
+          try { var b = JSON.parse(item.body); (b.data || []).forEach(function (row) { if (row.campaign_id != null) tByCamp[String(row.campaign_id)] = { spend: parseFloat(row.spend) || 0, clicks: parseInt(row.inline_link_clicks) || 0 }; }); } catch (e) {}
         });
       } catch (e) {}
     }
   }
+  /* 2) contas em OUTRO fuso: insight da conta com breakdown por HORA -> soma as horas que caem no dia BR. */
+  for (var tk2 in offByTk) {
+    var list2 = offByTk[tk2];
+    for (var k = 0; k < list2.length; k += 25) {
+      var chunk2 = list2.slice(k, k + 25);
+      var batchO = chunk2.map(function (o) { return { method: 'GET', relative_url: o.aid + '/insights?level=campaign&fields=campaign_id,spend,inline_link_clicks&time_increment=1&breakdowns=hourly_stats_aggregated_by_advertiser_time_zone&time_range=' + wideRange + '&limit=500' }; });
+      var bodyO = new URLSearchParams(); bodyO.append('batch', JSON.stringify(batchO)); bodyO.append('access_token', tk2);
+      try {
+        var respO = await fetch(API + '/', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: bodyO.toString() });
+        var arrO = await respO.json();
+        if (Array.isArray(arrO)) arrO.forEach(function (item, idx) {
+          var off = chunk2[idx].off;
+          try {
+            var b = JSON.parse(item.body); var rowsByC = {};
+            (b.data || []).forEach(function (row) { var id = String(row.campaign_id); (rowsByC[id] = rowsByC[id] || []).push(row); });
+            Object.keys(rowsByC).forEach(function (id) { var agg = sumBrDayHourly(rowsByC[id], brToday, Number(off)); tByCamp[id] = { spend: agg.spend, clicks: agg.clicks }; });
+          } catch (e) {}
+        });
+      } catch (e) {}
+    }
+  }
+  camps.forEach(function (c) { var t = tByCamp[String(c.id)]; if (t) { c._metaToday = t.spend; c._metaLinkClicks = t.clicks; } });
 }
 
 /* Busca os CONJUNTOS (ad sets) de cada campanha em LOTE (Batch API): id, status e limite atual
@@ -512,12 +527,13 @@ async function collect(env) {
   camps = camps.filter(function (c) { return keep[c._acctId]; });
 
   // GASTO de hoje = FACEBOOK/Meta (fonte confiavel). Gasto VITALICIO (saldo/remaining) tbm do Meta.
-  camps.forEach(function (c) { c._spendToday = 0; c._spend = 0; });
+  camps.forEach(function (c) { c._spendToday = 0; c._spend = 0; c._adsets = []; c._hasCap = false; });
   var sinceLife = new Date(); sinceLife.setMonth(sinceLife.getMonth() - 36);
   var lifeRange = encodeURIComponent(JSON.stringify({ since: sinceLife.toISOString().split('T')[0], until: brDatePlus(0) }));
   await batchLifetimeSpend(camps, lifeRange);
-  /* Conjuntos + limite de gasto atual (p/ regra LIMITAR/REMOVER e detectar campanha ja limitada). */
-  await batchAdsetCaps(camps);
+  /* Conjuntos + limite de gasto atual — SÓ das ATIVAS (pausadas nao precisam; o cap/LIMITAR so vale p/ ativa).
+     Menos chamadas por conta = evita o #17. As pausadas ficam com _adsets=[]/_hasCap=false (ja inicializados). */
+  await batchAdsetCaps(camps.filter(function (c) { return (c.effective_status || c.status || '').toUpperCase() === 'ACTIVE'; }));
   /* GASTO de HOJE + cliques no link, direto do Meta (inclui os CBO DIARIOS, p/ o alerta de metricas caras). */
   await batchTodayMeta(camps.concat(DAILY_CAMPS));
 
@@ -1282,25 +1298,44 @@ async function run(env, opts) {
         if (lines.length > 25) show.push('…e mais ' + (lines.length - 25) + ' campanha(s).');
         await sendTelegram(env, '\u{1F440} ROAS baixo — ACOMPANHAR (o robô NÃO pausa; limite no dash se quiser) — ' + lines.length + ' campanha(s):\n\n' + show.join('\n\n'));
       }
-      /* 🔴 ROAS CRÍTICO <= critRoas(1,3) — INDEPENDENTE do nº de vendas (pedido 02/10). Varre TODAS as campanhas
+      /* 🔴 ROAS CRÍTICO (30/10): SÓ campanhas com >= critMinSales(2) vendas E ROAS < critRoas(1,4). Varre as
          ATIVAS (CBO + diárias) com gasto > critMinSpend($50). ROAS = receita REAL do RedTrack / gasto (fallback
-         vendas×120 se não vier revenue). Repete a cada 30 min. Não sobrepõe o ACOMPANHAR (que é 1,3 < ROAS < 1,5). */
+         vendas×120 se não vier revenue). De hora em hora. SEM venda NÃO entra (vai p/ o alerta SEM VENDA).
+         Não sobrepõe o ACOMPANHAR (que agora é 1,4 < ROAS < 1,5). */
       var linesCrit = [];
       (camps.concat(DAILY_CAMPS)).forEach(function (c) {
         if ((c.effective_status || c.status || '').toUpperCase() !== 'ACTIVE') return;
+        if ((c._sales || 0) < RULES.critMinSales) return; /* precisa de >= 2 vendas (pedido 30/10) */
         var csp = c._spendToday || 0; if (csp <= RULES.critMinSpend) return;
         var crev = (c._rev > 0) ? c._rev : ((c._sales || 0) * 120);
         var croas = csp > 0 ? crev / csp : 0;
-        if (croas > RULES.critRoas) return; /* só <= 1,3 */
+        if (croas > RULES.critRoas) return; /* só <= 1,4 */
         var ck = c.id + ':crit';
         if (!canSendHour(ck)) return; /* de hora em hora */
-        linesCrit.push('• ' + c.name + '\n   ROAS ' + croas.toFixed(2) + ' (≤ ' + RULES.critRoas + ') · gasto $' + Math.round(csp) + ' · ' + (c._sales || 0) + ' venda(s)');
+        linesCrit.push('• ' + c.name + '\n   ROAS ' + croas.toFixed(2) + ' (< ' + RULES.critRoas + ') · gasto $' + Math.round(csp) + ' · ' + (c._sales || 0) + ' venda(s)');
         newSent[ck] = nowT;
       });
       if (linesCrit.length) {
         var showCrit = linesCrit.slice(0, 25);
         if (linesCrit.length > 25) showCrit.push('…e mais ' + (linesCrit.length - 25) + ' campanha(s).');
-        await sendTelegram(env, '\u{1F534} ROAS CRÍTICO (≤ ' + RULES.critRoas + ') — VERIFIQUE — ' + linesCrit.length + ' campanha(s):\n\n' + showCrit.join('\n\n'));
+        await sendTelegram(env, '\u{1F534} ROAS CRÍTICO (< ' + RULES.critRoas + ', ≥' + RULES.critMinSales + ' vendas) — VERIFIQUE — ' + linesCrit.length + ' campanha(s):\n\n' + showCrit.join('\n\n'));
+      }
+      /* 🛑 SEM VENDA — PAUSAR (30/10): campanha ATIVA, 0 venda e gasto >= noSaleSpend($80) -> aviso p/ pausar/analisar.
+         Substitui o antigo CRÍTICO-sem-venda (que disparava com qualquer gasto > $50). De hora em hora. */
+      var linesNS = [];
+      (camps.concat(DAILY_CAMPS)).forEach(function (c) {
+        if ((c.effective_status || c.status || '').toUpperCase() !== 'ACTIVE') return;
+        if ((c._sales || 0) > 0) return; /* só SEM venda */
+        var nsp = c._spendToday || 0; if (nsp < RULES.noSaleSpend) return;
+        var nk = c.id + ':nosale';
+        if (!canSendHour(nk)) return; /* de hora em hora */
+        linesNS.push('• ' + c.name + '\n   0 venda · gasto $' + Math.round(nsp) + ' (≥ $' + RULES.noSaleSpend + ') — PAUSAR/analisar');
+        newSent[nk] = nowT;
+      });
+      if (linesNS.length) {
+        var showNS = linesNS.slice(0, 25);
+        if (linesNS.length > 25) showNS.push('…e mais ' + (linesNS.length - 25) + ' campanha(s).');
+        await sendTelegram(env, '\u{1F6D1} SEM VENDA — PAUSAR (gasto ≥ $' + RULES.noSaleSpend + ', 0 venda) — ' + linesNS.length + ' campanha(s):\n\n' + showNS.join('\n\n'));
       }
       /* LIMITE DE GASTO (soft-stop sem venda). */
       var linesL = [];
@@ -1455,7 +1490,7 @@ async function forwardUtmify(env, p) {
     orderId: String(p.saleId), platform: 'JVZoo', paymentMethod: 'credit_card',
     status: p.refund ? 'refunded' : 'paid',
     createdAt: p.createdAt, approvedDate: p.refund ? null : p.createdAt, refundedAt: p.refund ? p.createdAt : null,
-    customer: { name: 'Cliente JVZoo', email: mail, phone: null, document: null, country: 'US' },
+    customer: { name: 'Cliente JVZoo', email: mail, phone: null, document: null, country: (/^[A-Z]{2}$/.test(p.co || '') ? p.co : 'US') },
     products: [{ id: 'jvzoo', name: (p.prod || 'JVZoo'), planId: null, planName: null, quantity: 1, priceInCents: cents }],
     trackingParameters: { src: p.src || null, sck: null, utm_source: p.utmSrc || null, utm_campaign: p.utmc || null, utm_medium: p.utmMed || null, utm_content: p.utmct || null, utm_term: p.utmTerm || null },
     commission: { totalPriceInCents: cents, gatewayFeeInCents: 0, userCommissionInCents: cents, currency: (p.cur || 'USD') },
@@ -1521,7 +1556,7 @@ export default {
           var nowBR = new Date(Date.now() - 3 * 3600000).toISOString().slice(0, 19).replace('T', ' '); /* data/hora BR p/ createdAt */
           ctx.waitUntil(forwardUtmify(env, {
             saleId: saleId, refund: refund, amt: amt, cur: cur, prod: prodName,
-            src: srcv, utmSrc: utmSrc, utmc: utmc, utmMed: utmMed, utmct: utmct, utmTerm: utmTerm, createdAt: nowBR
+            src: srcv, utmSrc: utmSrc, utmc: utmc, utmMed: utmMed, utmct: utmct, utmTerm: utmTerm, createdAt: nowBR, co: co
           }));
         }
       }
