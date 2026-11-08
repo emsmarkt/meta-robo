@@ -1298,28 +1298,8 @@ async function run(env, opts) {
         if (lines.length > 25) show.push('…e mais ' + (lines.length - 25) + ' campanha(s).');
         await sendTelegram(env, '\u{1F440} ROAS baixo — ACOMPANHAR (o robô NÃO pausa; limite no dash se quiser) — ' + lines.length + ' campanha(s):\n\n' + show.join('\n\n'));
       }
-      /* 🔴 ROAS CRÍTICO (30/10): SÓ campanhas com >= critMinSales(2) vendas E ROAS < critRoas(1,4). Varre as
-         ATIVAS (CBO + diárias) com gasto > critMinSpend($50). ROAS = receita REAL do RedTrack / gasto (fallback
-         vendas×120 se não vier revenue). De hora em hora. SEM venda NÃO entra (vai p/ o alerta SEM VENDA).
-         Não sobrepõe o ACOMPANHAR (que agora é 1,4 < ROAS < 1,5). */
-      var linesCrit = [];
-      (camps.concat(DAILY_CAMPS)).forEach(function (c) {
-        if ((c.effective_status || c.status || '').toUpperCase() !== 'ACTIVE') return;
-        if ((c._sales || 0) < RULES.critMinSales) return; /* precisa de >= 2 vendas (pedido 30/10) */
-        var csp = c._spendToday || 0; if (csp <= RULES.critMinSpend) return;
-        var crev = (c._rev > 0) ? c._rev : ((c._sales || 0) * 120);
-        var croas = csp > 0 ? crev / csp : 0;
-        if (croas > RULES.critRoas) return; /* só <= 1,4 */
-        var ck = c.id + ':crit';
-        if (!canSendHour(ck)) return; /* de hora em hora */
-        linesCrit.push('• ' + c.name + '\n   ROAS ' + croas.toFixed(2) + ' (< ' + RULES.critRoas + ') · gasto $' + Math.round(csp) + ' · ' + (c._sales || 0) + ' venda(s)');
-        newSent[ck] = nowT;
-      });
-      if (linesCrit.length) {
-        var showCrit = linesCrit.slice(0, 25);
-        if (linesCrit.length > 25) showCrit.push('…e mais ' + (linesCrit.length - 25) + ' campanha(s).');
-        await sendTelegram(env, '\u{1F534} ROAS CRÍTICO (< ' + RULES.critRoas + ', ≥' + RULES.critMinSales + ' vendas) — VERIFIQUE — ' + linesCrit.length + ' campanha(s):\n\n' + showCrit.join('\n\n'));
-      }
+      /* 🔴 "ROAS CRÍTICO — VERIFIQUE" REMOVIDO (08/11): agora o robô PAUSA sozinho por ROAS<1,4 (≥1 venda) e
+         manda "⏸️ PAUSADO por ROAS baixo" no fim do run(). O aviso de verificar virou redundante. */
       /* 🛑 SEM VENDA — PAUSAR (30/10): campanha ATIVA, 0 venda e gasto >= noSaleSpend($80) -> aviso p/ pausar/analisar.
          Substitui o antigo CRÍTICO-sem-venda (que disparava com qualquer gasto > $50). De hora em hora. */
       var linesNS = [];
@@ -1471,6 +1451,68 @@ async function run(env, opts) {
   DIAG.mad = { disabled: true, note: 'regra automática de madrugada DESATIVADA — limite de gasto só manual no dash' };
   DIAG.blocked = BLOCKED.length; /* visivel no /run */
 
+  /* ===== REGRA ÚNICA (08/11): PAUSAR / REATIVAR por ROAS — só campanhas com >=1 venda =====
+     ATIVA & vendas>=minSales & gasto>=minSpend & ROAS<thr  -> PAUSA.
+     PAUSADA PELO ROBÔ (KV roboPaused) & vendas>=minSales & ROAS>=thr -> REATIVA.
+     • Reativa SÓ o que o robô pausou (nunca o que o usuário pausou na mão).
+     • Cooldown anti-ping-pong (coolMs) entre mudanças na MESMA campanha.
+     • Só em `camps` (CBO vitalício). Pula CP_VALD (gestão manual) e NÃO toca DAILY_CAMPS.
+     • Escreve só em applyMode=live; em dry só mostra no /run (DIAG.roasRule.wouldPause/wouldReact).
+     • ROAS = receita REAL do RedTrack (c._rev, fallback vendas×120) / gasto. */
+  try {
+    var _rn = function (k, d) { var v = parseFloat(env[k]); return isFinite(v) ? v : d; };
+    var RR = { thr: _rn('R_RR_ROAS', 1.4), minSpend: _rn('R_RR_MINSPEND', 30), minSales: _rn('R_RR_MINSALES', 1), coolMs: _rn('R_RR_COOLDOWN', 60) * 60000, maxFlips: _rn('R_RR_MAXFLIPS', 20) };
+    var rrLive = applyMode === 'live';
+    var roboPaused = {}; try { var _rp = await env.RULES_KV.get('roboPaused'); if (_rp) { var _rpj = JSON.parse(_rp); if (_rpj && typeof _rpj === 'object') roboPaused = _rpj; } } catch (e) {}
+    var rrLast = {}; try { var _rl = await env.RULES_KV.get('roasRuleAt'); if (_rl) { var _rlj = JSON.parse(_rl); if (_rlj && typeof _rlj === 'object') rrLast = _rlj; } } catch (e) {}
+    var rrNow = Date.now(), rrDirty = false, rrFlips = 0, rrPaused = [], rrReact = [], rrWouldP = [], rrWouldR = [];
+    for (var ri = 0; ri < camps.length && rrFlips < RR.maxFlips; ri++) {
+      var cc = camps[ri];
+      if ((cc.name || '').toUpperCase().indexOf('VALD') >= 0) continue; /* CP_VALD = gestão manual */
+      var st = (cc.effective_status || cc.status || '').toUpperCase();
+      var sales = cc._sales || 0, spend = cc._spendToday || 0;
+      var rev = (cc._rev > 0) ? cc._rev : (sales * 120);
+      var roas = spend > 0 ? rev / spend : 0;
+      var coolOk = (rrNow - (rrLast[cc.id] || 0)) >= RR.coolMs;
+      /* PAUSAR */
+      if (st === 'ACTIVE' && sales >= RR.minSales && spend >= RR.minSpend && roas < RR.thr) {
+        rrWouldP.push(cc.name + ' (ROAS ' + roas.toFixed(2) + ', ' + sales + 'v, $' + Math.round(spend) + ')');
+        if (!coolOk) continue;
+        if (rrLive) {
+          try { await withTokenFallback(tokens, cc._tk, (function (id) { return function (tk) { return postForm(id, tk, { status: 'PAUSED' }); }; })(cc.id)); }
+          catch (eP) { DIAG.rrErr = String((eP && eP.message) || eP); continue; }
+          roboPaused[cc.id] = { ts: rrNow, day: today, name: cc.name, roas: +roas.toFixed(2) }; rrLast[cc.id] = rrNow; rrDirty = true;
+          await new Promise(function (r) { setTimeout(r, 250); });
+        }
+        rrFlips++; rrPaused.push({ name: cc.name, roas: +roas.toFixed(2), spend: Math.round(spend), sales: sales });
+        continue;
+      }
+      /* REATIVAR (só as que o robô pausou) */
+      if (st !== 'ACTIVE' && roboPaused[cc.id] && sales >= RR.minSales && roas >= RR.thr) {
+        rrWouldR.push(cc.name + ' (ROAS ' + roas.toFixed(2) + ')');
+        if (!coolOk) continue;
+        if (rrLive) {
+          try { await withTokenFallback(tokens, cc._tk, (function (id) { return function (tk) { return postForm(id, tk, { status: 'ACTIVE' }); }; })(cc.id)); }
+          catch (eR) { DIAG.rrErr = String((eR && eR.message) || eR); continue; }
+          delete roboPaused[cc.id]; rrLast[cc.id] = rrNow; rrDirty = true;
+          await new Promise(function (r) { setTimeout(r, 250); });
+        }
+        rrFlips++; rrReact.push({ name: cc.name, roas: +roas.toFixed(2), spend: Math.round(spend), sales: sales });
+        continue;
+      }
+    }
+    if (rrDirty) {
+      var _cut7 = rrNow - 7 * 86400000;
+      var _cRP = {}; Object.keys(roboPaused).forEach(function (k) { var v = roboPaused[k]; if (v && v.ts >= _cut7) _cRP[k] = v; });
+      var _cL = {}; Object.keys(rrLast).forEach(function (k) { if (rrLast[k] >= _cut7) _cL[k] = rrLast[k]; });
+      try { await env.RULES_KV.put('roboPaused', JSON.stringify(_cRP)); } catch (e) {}
+      try { await env.RULES_KV.put('roasRuleAt', JSON.stringify(_cL)); } catch (e) {}
+    }
+    DIAG.roasRule = { mode: applyMode, thr: RR.thr, minSpend: RR.minSpend, minSales: RR.minSales, cooldownMin: RR.coolMs / 60000, pausou: rrPaused.length, reativou: rrReact.length, wouldPause: rrWouldP.slice(0, 25), wouldReact: rrWouldR.slice(0, 25) };
+    if (rrLive && rrPaused.length && env.TG_TOKEN) await sendTelegram(env, '⏸️ PAUSADO por ROAS baixo (< ' + RR.thr + ') — ' + rrPaused.length + ' campanha(s):\n\n' + rrPaused.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)'; }).join('\n\n'));
+    if (rrLive && rrReact.length && env.TG_TOKEN) await sendTelegram(env, '▶️ REATIVADO — ROAS acima de ' + RR.thr + ' — ' + rrReact.length + ' campanha(s):\n\n' + rrReact.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)'; }).join('\n\n'));
+  } catch (e) { DIAG.roasRuleErr = String((e && e.message) || e); }
+
   var log = { at: new Date().toISOString(), mode: applyMode, mood: moodObj.mood, moodRoas: +moodObj.roas.toFixed(2), count: camps.length, diag: DIAG, actions: actions };
   try { await env.RULES_KV.put('lastRun', JSON.stringify(log)); } catch (e) {}
   return log;
@@ -1499,6 +1541,59 @@ async function forwardUtmify(env, p) {
   try { await fetch('https://api.utmify.com.br/api-credentials/orders', { method: 'POST', headers: { 'x-api-token': tok, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); } catch (e) {}
 }
 
+/* NICHO pelo NOME (campanha / cid / vídeo). Sigla tem que ser TOKEN ISOLADO: troca tudo que não é letra/número
+   por espaço e procura " SIGLA " (ex.: "[T2]", "T2 |", "- MEMO -"). "MM" dentro de outra palavra NÃO casa.
+   Sem acento e sem diferenciar maiúscula. Devolve 'TYPE 2' | 'MEMORIA' | 'WL' | ''. (Mesma regra no Apps Script.) */
+var NICHE_TOKENS = [
+  ['TYPE 2', ['T2', 'TY2', 'TYP2', 'TYPE2', 'TYPE 2']],
+  ['MEMORIA', ['MM', 'MEM', 'MEMO', 'MEMORIA']],
+  ['WL', ['WL', 'WEIGHT', 'WEIGHT LOSS', 'EMAG', 'EMAGRECIMENTO']]
+];
+function nicheOf(txt) {
+  var s = String(txt || '');
+  try { s = s.normalize('NFD').replace(/[̀-ͯ]/g, ''); } catch (e) {}
+  s = ' ' + s.toUpperCase().replace(/[^A-Z0-9]+/g, ' ') + ' ';
+  for (var i = 0; i < NICHE_TOKENS.length; i++) {
+    var toks = NICHE_TOKENS[i][1];
+    for (var j = 0; j < toks.length; j++) if (s.indexOf(' ' + toks[j] + ' ') >= 0) return NICHE_TOKENS[i][0];
+  }
+  return '';
+}
+/* MAPA PRODUTO -> NICHO (EDITE AQUI ao entrar produto novo). Usado principalmente na Digistore24, que NÃO
+   manda UTM. Casa por "CONTÉM" no nome do produto, sem acento/maiúscula e IGNORANDO espaço/pontuação
+   ("MIND SAFE" casa "MindSafe", "Mind-Safe 3 bottles"...). */
+var PRODUCT_NICHE = {
+  'TYPE 2': ['GLYCAZENIL', 'GLYCOEDEN'],
+  'MEMORIA': ['NEUROTAMINE', 'COGNIZIL', 'MIND SAFE'],
+  'WL': []
+};
+function squash(t) {
+  var s = String(t || '');
+  try { s = s.normalize('NFD').replace(/[̀-ͯ]/g, ''); } catch (e) {}
+  return s.toUpperCase().replace(/[^A-Z0-9]+/g, '');
+}
+function nicheOfProduct(pname) {
+  var p = squash(pname);
+  if (!p) return '';
+  var ks = Object.keys(PRODUCT_NICHE);
+  for (var i = 0; i < ks.length; i++) {
+    var arr = PRODUCT_NICHE[ks[i]] || [];
+    for (var j = 0; j < arr.length; j++) { var t = squash(arr[j]); if (t && p.indexOf(t) >= 0) return ks[i]; }
+  }
+  return '';
+}
+/* Hash SHA-256 (16 primeiros hex) do e-mail do cliente — NUNCA guarda o e-mail em claro. */
+async function hashEmail(mail) {
+  var m = String(mail || '').trim().toLowerCase();
+  if (!m || m.indexOf('@') < 0) return '';
+  try {
+    var buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(m));
+    return Array.prototype.map.call(new Uint8Array(buf), function (x) { return ('0' + x.toString(16)).slice(-2); }).join('').slice(0, 16);
+  } catch (e) { return ''; }
+}
+/* Nome de produto / tipo de pedido que indica UPSELL (não-front). */
+var UPSELL_RX = /upsell|upgrade|downsell|down sell|bump|one time offer|(^|[^a-z])oto([^a-z]|$)/i; /* "OTO1" casa, "photo" não */
+
 export default {
   async scheduled(event, env, ctx) { ctx.waitUntil(run(env)); },
   async fetch(request, env, ctx) {
@@ -1525,7 +1620,7 @@ export default {
       var adId = ((utmct.split('|').pop() || '').split('::')[0] || '').trim();
       if (!/^\d{6,}$/.test(adId)) adId = ''; /* só id de anúncio da Meta (numérico); senão deixa vazio */
       /* PAÍS: Cartpanda manda {country} (ex. "US"/"BR"). JVZoo às vezes manda country/ccountry. Normaliza em maiúsculas. */
-      var co = (q.get('country') || q.get('ccountry') || q.get('cntry') || '').toString().trim().toUpperCase().slice(0, 4);
+      var co = (q.get('country') || q.get('customer_country') || q.get('ccountry') || q.get('cntry') || '').toString().trim().toUpperCase().slice(0, 4);
       /* VALOR = COMISSÃO DO AFILIADO (o usuário é afiliado): JVZoo `affiliate_amount`, Cartpanda `amount_affiliate`.
          `amount` é o que as URLs de postback mandam (já apontando pro macro do afiliado). Totais só como fallback. */
       var amount = parseFloat(q.get('amount') || q.get('affiliate_amount') || q.get('amount_affiliate') || q.get('payout') || q.get('transaction_amount') || q.get('total_price') || q.get('amount_net') || '0') || 0;
@@ -1534,22 +1629,67 @@ export default {
       var plat = (q.get('plat') || q.get('src') || (path.split('/')[2] || '')).toString();
       var cur = (q.get('currency') || 'USD').toString();
       var isTest = (q.get('is_test') || '').toString();
-      var refund = /refund|chargeback|rfnd|cgbk|estorn|reembols|cancel|dispute|charge_back/.test(type);
+      /* TIPO DO EVENTO separado do TIPO DO PEDIDO (Digistore manda os dois: type=payment|refund|chargeback e
+         order_type=initial_sale|upsell). Refund olha TODOS os campos (antes só o 1º preenchido — order_type
+         "initial_sale" escondia o "refund"). "payment"/"sale"/"initial_sale"/"upsell" NÃO casam a regex. */
+      var evType = (q.get('type') || q.get('transaction_type') || q.get('event') || '').toString().toLowerCase();
+      var oType = (q.get('order_type') || q.get('otype') || '').toString().toLowerCase();
+      var upNo = (q.get('upsell_no') || '').toString().trim();
+      var isDs = /digistore|ds24/i.test(plat);
+      var refund = /refund|chargeback|rfnd|cgbk|estorn|reembols|cancel|dispute|charge_back/.test(type + ' ' + evType + ' ' + oType);
+      /* Digistore: só interessa pagamento/refund/chargeback. Outros eventos (rebill_cancelled, payment_missed,
+         last_paid_day, connection_test...) NÃO viram venda — responde 200 e ignora. */
+      if (isDs && evType && !/^(on_)?(payment|refund|chargeback)$/.test(evType)) return new Response('OK', { headers: CORS });
+      if (isDs) refund = /^(on_)?(refund|chargeback)$/.test(evType);
+      /* PRODUTO (só no JSON) e e-mail do cliente (vira HASH; o e-mail em claro nunca é gravado). */
+      var prodId = (q.get('product_id') || q.get('pid') || '').toString().slice(0, 64);
+      var custHash = await hashEmail(q.get('email') || q.get('customer_email') || '');
+      /* Texto da CAMPANHA p/ o nicho: JVZoo manda utm_campaign; Digistore não manda UTM -> usa cid/campaignkey. */
+      var cidTxt = (q.get('cid') || q.get('campaignkey') || '').toString().slice(0, 200);
       /* Campos extras p/ UTMify (atribuição por conjunto/anúncio): conjunto=utm_medium, origem=utm_source, termo, src, produto. */
       var utmMed = (q.get('utm_medium') || '').toString();
       var utmSrc = (q.get('utm_source') || 'FB').toString();
       var utmTerm = (q.get('utm_term') || '').toString();
       var srcv = (q.get('srcv') || q.get('vtid') || '').toString(); /* `src` puro é usado p/ `plat`; aqui pego srcv/vtid */
-      var prodName = (q.get('product') || q.get('product_name') || '').toString();
+      var prodName = (q.get('product') || q.get('product_name') || q.get('pname') || '').toString();
       if (!/^(1|true|yes|sim)$/i.test(isTest)) {
         /* data: hoje (BR) por padrão; backfill pode mandar ?day=YYYY-MM-DD p/ a data histórica da venda. */
         var day = /^\d{4}-\d{2}-\d{2}$/.test(q.get('day') || '') ? q.get('day') : brDatePlus(0);
         var amt = refund ? -Math.abs(amount) : amount;
-        var rec = { camp: campId, amt: amt, cur: cur, type: type, plat: plat, refund: refund, utmc: utmc, utmct: utmct, ad: adId, co: co, sale: saleId, ts: Date.now() };
+        /* NICHO da venda: Digistore -> 1º pelo PRODUTO (mapa PRODUCT_NICHE), senão cid/campaignkey.
+           JVZoo/Cartpanda -> 1º pelo utm_campaign, senão pelo produto, senão cid. */
+        var niche = isDs ? (nicheOfProduct(prodName) || nicheOf(cidTxt))
+                         : (nicheOf(utmc) || nicheOfProduct(prodName) || nicheOf(cidTxt));
+        /* FRONT x UPSELL (fe=1 front). Usado pelo /daily (planilha conta só venda FRONT).
+           - Digistore: order_type=initial_sale -> front (sem order_type: upsell_no vazio/0 -> front).
+           - JVZoo (não tem flag): nome do produto com upsell/oto/bump/upgrade/downsell -> upsell; senão, se o MESMO
+             e-mail (hash) já comprou HOJE (dia BR) -> upsell; senão front. Chave aux `pbcust:<dia>:<hash>` = 1ª venda.
+           - Cartpanda/outras: front, a não ser que order_type/type ou o nome do produto indiquem upsell.
+           - REFUND: herda o fe da venda original (chave `pbfe:<saleId>`); se não achar, usa as regras acima sem e-mail. */
+        var fe = 1;
+        if (isDs) fe = oType ? (/^initial/.test(oType) ? 1 : 0) : ((!upNo || upNo === '0') ? 1 : 0);
+        else if (UPSELL_RX.test(prodName) || UPSELL_RX.test(oType) || UPSELL_RX.test(type)) fe = 0;
+        if (refund) {
+          try { var feOrig = await env.RULES_KV.get('pbfe:' + saleId); if (feOrig === '0' || feOrig === '1') fe = parseInt(feOrig); } catch (e) {}
+        } else {
+          if (fe && /jvzoo/i.test(plat) && custHash) {
+            var ck = 'pbcust:' + day + ':' + custHash;
+            try {
+              var firstSale = await env.RULES_KV.get(ck);
+              if (firstSale && firstSale !== saleId) fe = 0; /* mesmo cliente já comprou hoje (outra venda) -> upsell */
+              else if (!firstSale) await env.RULES_KV.put(ck, saleId, { expirationTtl: 2 * 86400 });
+            } catch (e) {}
+          }
+          try { await env.RULES_KV.put('pbfe:' + saleId, String(fe), { expirationTtl: 70 * 86400 }); } catch (e) {}
+        }
+        var rec = { camp: campId, amt: amt, cur: cur, type: type, plat: plat, refund: refund, utmc: utmc, utmct: utmct, ad: adId, co: co, sale: saleId, ts: Date.now(),
+          evt: evType, otype: oType, upno: upNo, pid: prodId, pname: prodName.slice(0, 200), cust: custHash, cid: cidTxt, niche: niche, fe: fe };
         var key = 'pbsale:' + day + ':' + saleId + ':' + (refund ? 'r' : 's');
-        var md = { c: campId, a: amt, r: refund ? 1 : 0 }; /* metadata leve p/ leitura rápida */
+        var md = { c: campId, a: amt, r: refund ? 1 : 0, fe: fe }; /* metadata leve p/ leitura rápida */
         if (adId) md.ad = adId;
         if (co) md.co = co;
+        if (niche) md.n = niche;
+        if (cur && cur.toUpperCase() !== 'USD') md.cu = cur.toUpperCase().slice(0, 4); /* /daily não soma moeda ≠ USD */
         try { await env.RULES_KV.put(key, JSON.stringify(rec), { expirationTtl: 70 * 86400, metadata: md }); } catch (e) {}
         /* ENCAMINHA AO VIVO p/ UTMify 2 — SÓ JVZoo (Dash 2). Cartpanda NÃO (já tem UTMify própria/integração). */
         if (/jvzoo/i.test(plat)) {
@@ -1596,7 +1736,41 @@ export default {
         var dp = { orderId: 'PBDIAG-' + Date.now(), platform: 'JVZoo', paymentMethod: 'credit_card', status: 'paid', createdAt: '2026-10-12 12:00:00', approvedDate: '2026-10-12 12:00:00', refundedAt: null, customer: { name: 'PBDIAG', email: 'pbdiag@jvzoo.sale', phone: null, document: null, country: 'US' }, products: [{ id: 'x', name: 'PBDIAG', planId: null, planName: null, quantity: 1, priceInCents: 100 }], trackingParameters: { src: null, sck: null, utm_source: 'FB', utm_campaign: 'DIAG|999', utm_medium: 'CJ|999', utm_content: 'AD|999', utm_term: 'x' }, commission: { totalPriceInCents: 100, gatewayFeeInCents: 0, userCommissionInCents: 100, currency: 'USD' }, isTest: true };
         try { var dr = await fetch('https://api.utmify.com.br/api-credentials/orders', { method: 'POST', headers: { 'x-api-token': dtok, 'Content-Type': 'application/json' }, body: JSON.stringify(dp) }); utmifyTest = dr.status + ' ' + (await dr.text()); } catch (e) { utmifyTest = 'ERR ' + (e && e.message); }
       }
-      return jsonResp({ codeVersion: 'fwd-v1', utmifyTokenInKV: !!dtok, tokenLen: dtok ? dtok.length : 0, utmifyTest: utmifyTest });
+      return jsonResp({ codeVersion: 'daily-v1', utmifyTokenInKV: !!dtok, tokenLen: dtok ? dtok.length : 0, utmifyTest: utmifyTest });
+    }
+    /* RESUMO DIÁRIO p/ a PLANILHA (Apps Script lê às 06h): ?day=YYYY-MM-DD (dia BR; padrão = ontem).
+       Por nicho: sales = nº de vendas FRONT aprovadas, revenue = comissão USD dessas vendas, refunds = nº de
+       refunds/chargebacks de FRONT no dia (só informativo, NÃO desconta). GERAL = tudo. Registro antigo sem `fe`
+       conta como front; sem `n` cai em SEM_NICHO. Moeda ≠ USD não soma no revenue (vai p/ nonUsd). */
+    if (path === '/daily') {
+      var dday = _u.searchParams.get('day') || '';
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dday)) dday = brDatePlus(-1);
+      var NK = { 'TYPE 2': 'TYPE 2', 'MEMORIA': 'MEMORIA', 'WL': 'WL' };
+      var niches = {};
+      ['GERAL', 'TYPE 2', 'MEMORIA', 'WL', 'SEM_NICHO'].forEach(function (k) { niches[k] = { sales: 0, revenue: 0, refunds: 0, upsells: 0, nonUsd: {} }; });
+      var addTo = function (k, m) {
+        var o = niches[k], isFe = (m.fe == null || m.fe === '' || Number(m.fe) === 1);
+        if (!isFe) { if (!m.r) o.upsells++; return; }
+        if (m.r) { o.refunds++; return; }
+        o.sales++;
+        if (m.cu && m.cu !== 'USD') o.nonUsd[m.cu] = Math.round(((o.nonUsd[m.cu] || 0) + (parseFloat(m.a) || 0)) * 100) / 100;
+        else o.revenue += (parseFloat(m.a) || 0);
+      };
+      var dcur = undefined, dcount = 0;
+      try {
+        do {
+          var dlst = await env.RULES_KV.list({ prefix: 'pbsale:' + dday + ':', cursor: dcur, limit: 1000 });
+          (dlst.keys || []).forEach(function (kk) {
+            var m = kk.metadata || {};
+            dcount++;
+            addTo('GERAL', m);
+            addTo(NK[m.n] || 'SEM_NICHO', m);
+          });
+          dcur = dlst.list_complete ? null : dlst.cursor;
+        } while (dcur);
+      } catch (e) { return jsonResp({ day: dday, version: 'daily-v1', err: 'kv falhou: ' + String((e && e.message) || e) }); }
+      Object.keys(niches).forEach(function (k) { niches[k].revenue = Math.round(niches[k].revenue * 100) / 100; });
+      return jsonResp({ day: dday, version: 'daily-v1', records: dcount, niches: niches });
     }
     /* BREAKDOWN por AD e por PAÍS (Dash 2 detalha): ?camp=<id>&since=&until=. Usa metadata {ad,co}.
        So registros com ad/co (postback novo, ou backfill re-enviado com utm_content/country). Devolve { byAd, byCountry }. */
