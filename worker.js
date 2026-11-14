@@ -1541,6 +1541,66 @@ async function forwardUtmify(env, p) {
   try { await fetch('https://api.utmify.com.br/api-credentials/orders', { method: 'POST', headers: { 'x-api-token': tok, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); } catch (e) {}
 }
 
+/* ============ WEB PUSH (VAPID + aes128gcm — RFC 8291/8292) ============ */
+function b64uToBytes(s){ s = String(s||'').replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; var bin=atob(s); var b=new Uint8Array(bin.length); for(var i=0;i<bin.length;i++) b[i]=bin.charCodeAt(i); return b; }
+function bytesToB64u(buf){ var b=new Uint8Array(buf), s=''; for(var i=0;i<b.length;i++) s+=String.fromCharCode(b[i]); return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
+function wpStr(s){ return new TextEncoder().encode(s); }
+function wpCat(arrs){ var len=0; arrs.forEach(function(a){ len+=a.length; }); var out=new Uint8Array(len), o=0; arrs.forEach(function(a){ out.set(a,o); o+=a.length; }); return out; }
+async function wpEncrypt(p256dhB64, authB64, payloadBytes){
+  var uaPub = b64uToBytes(p256dhB64), auth = b64uToBytes(authB64);
+  var salt = crypto.getRandomValues(new Uint8Array(16));
+  var eph = await crypto.subtle.generateKey({name:'ECDH', namedCurve:'P-256'}, true, ['deriveBits']);
+  var asPub = new Uint8Array(await crypto.subtle.exportKey('raw', eph.publicKey));
+  var uaKey = await crypto.subtle.importKey('raw', uaPub, {name:'ECDH', namedCurve:'P-256'}, false, []);
+  var ecdh = new Uint8Array(await crypto.subtle.deriveBits({name:'ECDH', public: uaKey}, eph.privateKey, 256));
+  var ecdhKey = await crypto.subtle.importKey('raw', ecdh, 'HKDF', false, ['deriveBits']);
+  var keyInfo = wpCat([wpStr('WebPush: info\0'), uaPub, asPub]);
+  var ikm = new Uint8Array(await crypto.subtle.deriveBits({name:'HKDF', hash:'SHA-256', salt:auth, info:keyInfo}, ecdhKey, 256));
+  var ikmKey = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
+  var cek = new Uint8Array(await crypto.subtle.deriveBits({name:'HKDF', hash:'SHA-256', salt:salt, info:wpStr('Content-Encoding: aes128gcm\0')}, ikmKey, 128));
+  var nonce = new Uint8Array(await crypto.subtle.deriveBits({name:'HKDF', hash:'SHA-256', salt:salt, info:wpStr('Content-Encoding: nonce\0')}, ikmKey, 96));
+  var content = wpCat([payloadBytes, new Uint8Array([2])]);
+  var aesKey = await crypto.subtle.importKey('raw', cek, {name:'AES-GCM'}, false, ['encrypt']);
+  var cipher = new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM', iv:nonce, tagLength:128}, aesKey, content));
+  return wpCat([salt, new Uint8Array([0,0,0x10,0x00]), new Uint8Array([asPub.length]), asPub, cipher]);
+}
+async function wpVapid(env, endpoint){
+  var aud = new URL(endpoint).origin;
+  var header = bytesToB64u(wpStr(JSON.stringify({typ:'JWT', alg:'ES256'})));
+  var payload = bytesToB64u(wpStr(JSON.stringify({ aud: aud, exp: Math.floor(Date.now()/1000)+43200, sub: env.VAPID_SUBJECT || 'https://emsmarkt.github.io/meta-dash-3/' })));
+  var signingInput = header + '.' + payload;
+  var jwk = (typeof env.VAPID_PRIVATE_JWK === 'string') ? JSON.parse(env.VAPID_PRIVATE_JWK) : env.VAPID_PRIVATE_JWK;
+  var key = await crypto.subtle.importKey('jwk', { kty:'EC', crv:'P-256', d:jwk.d, x:jwk.x, y:jwk.y, ext:true }, {name:'ECDSA', namedCurve:'P-256'}, false, ['sign']);
+  var sig = await crypto.subtle.sign({name:'ECDSA', hash:'SHA-256'}, key, wpStr(signingInput));
+  return 'vapid t=' + signingInput + '.' + bytesToB64u(sig) + ', k=' + env.VAPID_PUBLIC;
+}
+async function sendWebPush(env, sub, payloadObj){
+  try {
+    if (!env.VAPID_PRIVATE_JWK || !env.VAPID_PUBLIC) return { err:'no vapid' };
+    var body = await wpEncrypt(sub.keys.p256dh, sub.keys.auth, wpStr(JSON.stringify(payloadObj)));
+    var auth = await wpVapid(env, sub.endpoint);
+    var r = await fetch(sub.endpoint, { method:'POST', headers: { 'Authorization': auth, 'Content-Encoding':'aes128gcm', 'Content-Type':'application/octet-stream', 'TTL':'86400' }, body: body });
+    if (r.status === 404 || r.status === 410) return { gone:true, status:r.status };
+    return { status: r.status };
+  } catch(e){ return { err: String((e&&e.message)||e) }; }
+}
+async function pushAll(env, payloadObj){
+  var sent=0, removed=0, errs=[], cursor;
+  do {
+    var lst = await env.RULES_KV.list({ prefix:'pushsub:', cursor:cursor, limit:1000 });
+    for (var i=0;i<lst.keys.length;i++){
+      var raw = await env.RULES_KV.get(lst.keys[i].name); if (!raw) continue;
+      var sub; try { sub = JSON.parse(raw); } catch(e){ continue; }
+      var res = await sendWebPush(env, sub, payloadObj);
+      if (res.gone) { await env.RULES_KV.delete(lst.keys[i].name); removed++; }
+      else if (res.status && res.status < 400) sent++;
+      else if (res.err) errs.push(res.err);
+    }
+    cursor = lst.list_complete ? null : lst.cursor;
+  } while (cursor);
+  return { sent: sent, removed: removed, errs: errs.slice(0,3) };
+}
+
 export default {
   async scheduled(event, env, ctx) { ctx.waitUntil(run(env)); },
   async fetch(request, env, ctx) {
@@ -1577,6 +1637,12 @@ export default {
       var cur = (q.get('currency') || 'USD').toString();
       var isTest = (q.get('is_test') || '').toString();
       var refund = /refund|chargeback|rfnd|cgbk|estorn|reembols|cancel|dispute|charge_back/.test(type);
+      /* IC (InitiateCheckout / "order form visit") pela PLATAFORMA — SEM pixel. A plataforma dispara um
+         postback de checkout p/ o mesmo worker; marcamos com type/event=checkout (ou ic=1). Aceita vários nomes. */
+      var evParam = (q.get('event') || q.get('event_type') || '').toLowerCase();
+      var isCheckout = /checkout|initiate[_ ]?checkout|order[_ ]?form|orderform|iniciar[_ ]?checkout/.test(type)
+                    || /checkout|initiate|order[_ ]?form|orderform/.test(evParam)
+                    || /^(1|true|yes|sim)$/i.test(q.get('ic') || q.get('checkout') || '');
       /* Campos extras p/ UTMify (atribuição por conjunto/anúncio): conjunto=utm_medium, origem=utm_source, termo, src, produto. */
       var utmMed = (q.get('utm_medium') || '').toString();
       var utmSrc = (q.get('utm_source') || 'FB').toString();
@@ -1586,6 +1652,14 @@ export default {
       if (!/^(1|true|yes|sim)$/i.test(isTest)) {
         /* data: hoje (BR) por padrão; backfill pode mandar ?day=YYYY-MM-DD p/ a data histórica da venda. */
         var day = /^\d{4}-\d{2}-\d{2}$/.test(q.get('day') || '') ? q.get('day') : brDatePlus(0);
+        /* CHECKOUT (IC): grava em pbic (não é venda) e sai. Dedup por vid/visitor/saleId. */
+        if (isCheckout) {
+          if (campId && /^\d{4,}$/.test(campId)) {
+            var vidC = ((q.get('vid') || q.get('visitor') || saleId || '').toString().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40)) || ('v' + Date.now());
+            try { await env.RULES_KV.put('pbic:' + day + ':' + campId + ':' + vidC, '1', { expirationTtl: 70 * 86400, metadata: { c: campId } }); } catch (e) {}
+          }
+          return new Response('OK', { headers: CORS });
+        }
         var amt = refund ? -Math.abs(amount) : amount;
         var rec = { camp: campId, amt: amt, cur: cur, type: type, plat: plat, refund: refund, utmc: utmc, utmct: utmct, ad: adId, co: co, sale: saleId, ts: Date.now() };
         var key = 'pbsale:' + day + ':' + saleId + ':' + (refund ? 'r' : 's');
@@ -1601,8 +1675,36 @@ export default {
             src: srcv, utmSrc: utmSrc, utmc: utmc, utmMed: utmMed, utmct: utmct, utmTerm: utmTerm, createdAt: nowBR, co: co
           }));
         }
+        /* 🔔 WEB PUSH no celular (app fechado) — só VENDA real (não estorno). Produto + comissão + valor da venda. */
+        if (!refund) {
+          var saleVal = parseFloat(q.get('total_price') || q.get('transaction_amount') || q.get('amount_total') || '0') || 0;
+          var wpMoney = function(v){ return (cur === 'BRL' ? 'R$ ' : 'US$ ') + (Number(v)||0).toLocaleString('pt-BR', { minimumFractionDigits:2, maximumFractionDigits:2 }); };
+          var wpBody = (prodName ? prodName + ' · ' : '') + 'comissão ' + wpMoney(amount) + (saleVal > 0 ? ' · venda ' + wpMoney(saleVal) : '');
+          ctx.waitUntil(pushAll(env, { title: '💰 Nova venda!', body: wpBody, url: '/', tag: 'sale-' + saleId }));
+        }
       }
       return new Response('OK', { headers: CORS }); /* JVZoo/Cartpanda só querem um 200 */
+    }
+    /* IC (InitiateCheckout / "order form visit"): PIXEL na página de CHECKOUT que o Emerson controla.
+       Ex.: <img src="https://meta-robo.../ic?utm_campaign={{utm_campaign}}&vid=XYZ">. Lê o campId do
+       utm_campaign (mesmo formato "NOME|ID" das vendas) e conta 1 por vid/dia/campanha (dedup pelo vid).
+       Devolve um GIF 1x1 transparente p/ funcionar como <img>. */
+    if (path === '/ic') {
+      var qi = _u.searchParams;
+      if (env.PB_KEY && qi.get('k') !== env.PB_KEY) return new Response('forbidden', { status: 403, headers: CORS });
+      var utmci = qi.get('utm_campaign') || '';
+      try { if (/%[0-9a-f]{2}/i.test(utmci)) utmci = decodeURIComponent(utmci); } catch (e) {}
+      utmci = utmci.replace(/%7C/ig, '|');
+      var campIdI = (utmci.split('|').pop() || '').trim();
+      if (campIdI && /^\d{4,}$/.test(campIdI)) {
+        var vid = (qi.get('vid') || ('v' + Date.now() + Math.random().toString(36).slice(2))).toString().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40);
+        var dayI = /^\d{4}-\d{2}-\d{2}$/.test(qi.get('day') || '') ? qi.get('day') : brDatePlus(0);
+        var keyI = 'pbic:' + dayI + ':' + campIdI + ':' + vid;
+        try { await env.RULES_KV.put(keyI, '1', { expirationTtl: 70 * 86400, metadata: { c: campIdI } }); } catch (e) {}
+      }
+      /* GIF 1x1 transparente (base64) — serve como <img> sem erro visual. */
+      var gif = Uint8Array.from(atob('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'), function (c) { return c.charCodeAt(0); });
+      return new Response(gif, { headers: Object.assign({ 'content-type': 'image/gif', 'cache-control': 'no-store' }, CORS) });
     }
     /* LEITURA (Dash 2 lê): agrega as vendas por CAMPANHA no período. ?since=YYYY-MM-DD&until=YYYY-MM-DD (dia BR).
        Devolve { byCamp: { campId: { sales, revenue } } }. Usa a metadata do list (sem 1 GET por venda). */
@@ -1620,14 +1722,48 @@ export default {
           (lst.keys || []).forEach(function (kk) {
             var md = kk.metadata || {};
             var c = (md.c != null && md.c !== '') ? md.c : '(sem campanha)';
-            if (!byCamp[c]) byCamp[c] = { sales: 0, revenue: 0 };
+            if (!byCamp[c]) byCamp[c] = { sales: 0, revenue: 0, ic: 0 };
             byCamp[c].revenue += (parseFloat(md.a) || 0);
             byCamp[c].sales += (md.r ? -1 : 1);
           });
           cursor = lst.list_complete ? null : lst.cursor;
         } while (cursor);
+        /* IC (InitiateCheckout / "order form visit") do CHECKOUT — contado do mesmo dia.
+           Chave pbic:DIA:campId:vid -> 1 por visitante/dia/campanha (dedup pelo vid). */
+        var cursorI = undefined;
+        do {
+          var lstI = await env.RULES_KV.list({ prefix: 'pbic:' + days[di] + ':', cursor: cursorI, limit: 1000 });
+          (lstI.keys || []).forEach(function (kk) {
+            var md = kk.metadata || {};
+            var c = (md.c != null && md.c !== '') ? md.c : '(sem campanha)';
+            if (!byCamp[c]) byCamp[c] = { sales: 0, revenue: 0, ic: 0 };
+            byCamp[c].ic = (byCamp[c].ic || 0) + 1;
+          });
+          cursorI = lstI.list_complete ? null : lstI.cursor;
+        } while (cursorI);
       }
       return jsonResp({ byCamp: byCamp, days: days.length });
+    }
+    /* WEB PUSH — inscrição do celular (POST = salva, DELETE = remove). Guarda a PushSubscription no KV. */
+    if (path === '/subscribe') {
+      if (request.method === 'POST') {
+        var subB; try { subB = await request.json(); } catch (e) { return jsonResp({ ok:false, err:'bad json' }); }
+        if (!subB || !subB.endpoint || !subB.keys) return jsonResp({ ok:false, err:'sem subscription' });
+        var sid = bytesToB64u(await crypto.subtle.digest('SHA-256', wpStr(subB.endpoint)));
+        try { await env.RULES_KV.put('pushsub:' + sid, JSON.stringify(subB), { expirationTtl: 180 * 86400 }); } catch (e) {}
+        return jsonResp({ ok:true, id: sid.slice(0,8) });
+      }
+      if (request.method === 'DELETE') {
+        var subD = null; try { subD = await request.json(); } catch (e) {}
+        if (subD && subD.endpoint) { var did = bytesToB64u(await crypto.subtle.digest('SHA-256', wpStr(subD.endpoint))); try { await env.RULES_KV.delete('pushsub:' + did); } catch (e) {} }
+        return jsonResp({ ok:true });
+      }
+      return jsonResp({ ok:true, info:'POST a PushSubscription p/ registrar; DELETE p/ remover' });
+    }
+    /* Dispara um push de TESTE p/ todos os celulares inscritos (verifica o push com o app fechado). */
+    if (path === '/pushtest') {
+      var pr = await pushAll(env, { title:'💰 Teste · Scalefy', body:'Push funcionando! Quando cair uma venda, chega assim.', url:'/' });
+      return jsonResp(pr);
     }
     /* DIAGNÓSTICO do encaminhamento UTMify: diz se ESTE worker tem o código novo (codeVersion), se o token
        está no KV (utmify2_token) e, com ?post=1, faz um POST isTest na UTMify e devolve a resposta dela. */
@@ -1677,10 +1813,14 @@ export default {
       try { var cached = await env.RULES_KV.get(vck); if (cached) return jsonResp(JSON.parse(cached)); } catch (e) {}
       var VH = { 'X-Api-Token': env.VTURB_TOKEN, 'X-Api-Version': 'v1', 'Content-Type': 'application/json' };
       var byAdV = {};
+      var _dbg = _u.searchParams.get('debug') === '1';
       try {
         var plr = await fetch('https://analytics.vturb.net/players/list?start_date=' + encodeURIComponent(vsin) + '&end_date=' + encodeURIComponent(vunt) + '&timezone=America/Sao_Paulo', { headers: VH });
-        var players = await plr.json();
-        if (!Array.isArray(players)) players = [];
+        var _plrTxt = await plr.text();
+        var players; try { players = JSON.parse(_plrTxt); } catch (e) { players = null; }
+        if (_dbg || !Array.isArray(players)) {
+          if (!Array.isArray(players)) return jsonResp({ byAd: {}, err: 'players/list nao-array', status: plr.status, body: String(_plrTxt).slice(0, 400) });
+        }
         for (var pi = 0; pi < players.length; pi++) {
           var pl = players[pi];
           try {
@@ -1698,7 +1838,7 @@ export default {
             });
           } catch (e) {}
         }
-      } catch (e) { return jsonResp({ byAd: {}, err: 'vturb falhou' }); }
+      } catch (e) { return jsonResp({ byAd: {}, err: 'vturb falhou: ' + String((e && e.message) || e) }); }
       var outV = { byAd: byAdV, players: (players || []).length };
       try { await env.RULES_KV.put(vck, JSON.stringify(outV), { expirationTtl: 600 }); } catch (e) {}
       return jsonResp(outV);
