@@ -1811,7 +1811,7 @@ export default {
       var vunt = (_u.searchParams.get('until') || brDatePlus(0)) + ' 23:59:59';
       var vck = 'vturbic:' + vsin + ':' + vunt;
       try { var cached = await env.RULES_KV.get(vck); if (cached) return jsonResp(JSON.parse(cached)); } catch (e) {}
-      var VH = { 'X-Api-Token': env.VTURB_TOKEN, 'X-Api-Version': 'v1', 'Content-Type': 'application/json' };
+      var VH = { 'X-Api-Token': env.VTURB_TOKEN, 'X-Api-Version': 'v1', 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' };
       var byAdV = {};
       var _dbg = _u.searchParams.get('debug') === '1';
       try {
