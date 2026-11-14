@@ -1639,10 +1639,6 @@ export default {
       var refund = /refund|chargeback|rfnd|cgbk|estorn|reembols|cancel|dispute|charge_back/.test(type);
       /* IC (InitiateCheckout / "order form visit") pela PLATAFORMA — SEM pixel. A plataforma dispara um
          postback de checkout p/ o mesmo worker; marcamos com type/event=checkout (ou ic=1). Aceita vários nomes. */
-      var evParam = (q.get('event') || q.get('event_type') || '').toLowerCase();
-      var isCheckout = /checkout|initiate[_ ]?checkout|order[_ ]?form|orderform|iniciar[_ ]?checkout/.test(type)
-                    || /checkout|initiate|order[_ ]?form|orderform/.test(evParam)
-                    || /^(1|true|yes|sim)$/i.test(q.get('ic') || q.get('checkout') || '');
       /* Campos extras p/ UTMify (atribuição por conjunto/anúncio): conjunto=utm_medium, origem=utm_source, termo, src, produto. */
       var utmMed = (q.get('utm_medium') || '').toString();
       var utmSrc = (q.get('utm_source') || 'FB').toString();
@@ -1653,13 +1649,6 @@ export default {
         /* data: hoje (BR) por padrão; backfill pode mandar ?day=YYYY-MM-DD p/ a data histórica da venda. */
         var day = /^\d{4}-\d{2}-\d{2}$/.test(q.get('day') || '') ? q.get('day') : brDatePlus(0);
         /* CHECKOUT (IC): grava em pbic (não é venda) e sai. Dedup por vid/visitor/saleId. */
-        if (isCheckout) {
-          if (campId && /^\d{4,}$/.test(campId)) {
-            var vidC = ((q.get('vid') || q.get('visitor') || saleId || '').toString().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40)) || ('v' + Date.now());
-            try { await env.RULES_KV.put('pbic:' + day + ':' + campId + ':' + vidC, '1', { expirationTtl: 70 * 86400, metadata: { c: campId } }); } catch (e) {}
-          }
-          return new Response('OK', { headers: CORS });
-        }
         var amt = refund ? -Math.abs(amount) : amount;
         var rec = { camp: campId, amt: amt, cur: cur, type: type, plat: plat, refund: refund, utmc: utmc, utmct: utmct, ad: adId, co: co, sale: saleId, ts: Date.now() };
         var key = 'pbsale:' + day + ':' + saleId + ':' + (refund ? 'r' : 's');
@@ -1709,40 +1698,32 @@ export default {
     /* LEITURA (Dash 2 lê): agrega as vendas por CAMPANHA no período. ?since=YYYY-MM-DD&until=YYYY-MM-DD (dia BR).
        Devolve { byCamp: { campId: { sales, revenue } } }. Usa a metadata do list (sem 1 GET por venda). */
     if (path === '/pbsales') {
-      var since = _u.searchParams.get('since') || brDatePlus(0);
-      var until = _u.searchParams.get('until') || since;
-      var days = [];
-      var d0 = Date.parse(since + 'T00:00:00Z'), d1 = Date.parse(until + 'T00:00:00Z');
-      if (isFinite(d0) && isFinite(d1) && d1 >= d0 && (d1 - d0) <= 370 * 86400000) { for (var tt = d0; tt <= d1; tt += 86400000) days.push(new Date(tt).toISOString().slice(0, 10)); } else days = [since];
-      var byCamp = {};
-      for (var di = 0; di < days.length; di++) {
-        var cursor = undefined;
-        do {
-          var lst = await env.RULES_KV.list({ prefix: 'pbsale:' + days[di] + ':', cursor: cursor, limit: 1000 });
-          (lst.keys || []).forEach(function (kk) {
-            var md = kk.metadata || {};
-            var c = (md.c != null && md.c !== '') ? md.c : '(sem campanha)';
-            if (!byCamp[c]) byCamp[c] = { sales: 0, revenue: 0, ic: 0 };
-            byCamp[c].revenue += (parseFloat(md.a) || 0);
-            byCamp[c].sales += (md.r ? -1 : 1);
-          });
-          cursor = lst.list_complete ? null : lst.cursor;
-        } while (cursor);
-        /* IC (InitiateCheckout / "order form visit") do CHECKOUT — contado do mesmo dia.
-           Chave pbic:DIA:campId:vid -> 1 por visitante/dia/campanha (dedup pelo vid). */
-        var cursorI = undefined;
-        do {
-          var lstI = await env.RULES_KV.list({ prefix: 'pbic:' + days[di] + ':', cursor: cursorI, limit: 1000 });
-          (lstI.keys || []).forEach(function (kk) {
-            var md = kk.metadata || {};
-            var c = (md.c != null && md.c !== '') ? md.c : '(sem campanha)';
-            if (!byCamp[c]) byCamp[c] = { sales: 0, revenue: 0, ic: 0 };
-            byCamp[c].ic = (byCamp[c].ic || 0) + 1;
-          });
-          cursorI = lstI.list_complete ? null : lstI.cursor;
-        } while (cursorI);
+      try {
+        var since = _u.searchParams.get('since') || brDatePlus(0);
+        var until = _u.searchParams.get('until') || since;
+        var days = [];
+        var d0 = Date.parse(since + 'T00:00:00Z'), d1 = Date.parse(until + 'T00:00:00Z');
+        if (isFinite(d0) && isFinite(d1) && d1 >= d0 && (d1 - d0) <= 370 * 86400000) { for (var tt = d0; tt <= d1; tt += 86400000) days.push(new Date(tt).toISOString().slice(0, 10)); } else days = [since];
+        var byCamp = {};
+        for (var di = 0; di < days.length; di++) {
+          var cursor = undefined;
+          do {
+            var lst = await env.RULES_KV.list({ prefix: 'pbsale:' + days[di] + ':', cursor: cursor, limit: 1000 });
+            (lst.keys || []).forEach(function (kk) {
+              var md = kk.metadata || {};
+              var c = (md.c != null && md.c !== '') ? md.c : '(sem campanha)';
+              if (!byCamp[c]) byCamp[c] = { sales: 0, revenue: 0, ic: 0 };
+              byCamp[c].revenue += (parseFloat(md.a) || 0);
+              byCamp[c].sales += (md.r ? -1 : 1);
+            });
+            cursor = lst.list_complete ? null : lst.cursor;
+          } while (cursor);
+        }
+        /* IC NÃO vem daqui (vem da VTurb /vturbic). Removido o loop de pbic que derrubava a leitura. */
+        return jsonResp({ byCamp: byCamp, days: days.length });
+      } catch (e) {
+        return jsonResp({ byCamp: {}, err: 'pbsales: ' + String((e && e.message) || e) });
       }
-      return jsonResp({ byCamp: byCamp, days: days.length });
     }
     /* WEB PUSH — inscrição do celular (POST = salva, DELETE = remove). Guarda a PushSubscription no KV. */
     if (path === '/subscribe') {
