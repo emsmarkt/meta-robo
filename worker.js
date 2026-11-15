@@ -1783,6 +1783,25 @@ export default {
       }
       return jsonResp({ byAd: byAd, byCountry: byCountry, days: bdays.length });
     }
+    /* DIAGNÓSTICO: registros CRUS de venda de um dia (plataforma, saleId, hora BR, tipo, valor, utm). ?day=YYYY-MM-DD */
+    if (path === '/pbraw') {
+      var rday = /^\d{4}-\d{2}-\d{2}$/.test(_u.searchParams.get('day') || '') ? _u.searchParams.get('day') : brDatePlus(0);
+      var recs = [], rcur = undefined, n = 0;
+      do {
+        var rl = await env.RULES_KV.list({ prefix: 'pbsale:' + rday + ':', cursor: rcur, limit: 1000 });
+        for (var ri = 0; ri < (rl.keys || []).length && n < 300; ri++) {
+          var kk = rl.keys[ri];
+          var raw = null; try { raw = await env.RULES_KV.get(kk.name); } catch (e) {}
+          var rec = {}; try { rec = raw ? JSON.parse(raw) : {}; } catch (e) {}
+          var hhBR = rec.ts ? new Date(rec.ts - 3 * 3600000).toISOString().slice(11, 16) : '?';
+          recs.push({ hora_BR: hhBR, plat: rec.plat || '?', type: rec.type || '?', valor: rec.amt, cur: rec.cur || '?', camp: rec.camp || '', ad: rec.ad || '', saleId: rec.sale || '', utm_campaign: rec.utmc || '', refund: !!rec.refund });
+          n++;
+        }
+        rcur = rl.list_complete ? null : rl.cursor;
+      } while (rcur && n < 300);
+      recs.sort(function (a, b) { return (a.hora_BR < b.hora_BR) ? -1 : 1; });
+      return jsonResp({ day: rday, total: recs.length, vendas: recs });
+    }
     /* IC (clique no botão da VSL) direto da VTURB, por AD (utm_content). O Meta às vezes não marca IC;
        a VTurb marca o clique no botão. Soma `total_clicked` de TODOS os vídeos, agrupado por utm_content,
        e extrai o adId. Precisa do secret env.VTURB_TOKEN. Cacheia 10min no KV (rate limit da VTurb). */
@@ -1790,13 +1809,17 @@ export default {
       if (!env.VTURB_TOKEN) return jsonResp({ byAd: {}, err: 'sem VTURB_TOKEN' });
       var vsin = (_u.searchParams.get('since') || brDatePlus(0)) + ' 00:00:00';
       var vunt = (_u.searchParams.get('until') || brDatePlus(0)) + ' 23:59:59';
+      /* players/list de um dia só volta VAZIO (bug da VTurb); por isso listamos os players num RANGE LARGO
+         (45 dias antes do 'since') e depois contamos os cliques só do dia pedido (vsin/vunt) nos stats. */
+      var _plStartMs = Date.parse(((_u.searchParams.get('since') || brDatePlus(0))) + 'T00:00:00Z') - 45 * 86400000;
+      var vplSin = (isFinite(_plStartMs) ? new Date(_plStartMs).toISOString().slice(0, 10) : brDatePlus(-45)) + ' 00:00:00';
       var vck = 'vturbic:' + vsin + ':' + vunt;
       try { var cached = await env.RULES_KV.get(vck); if (cached) return jsonResp(JSON.parse(cached)); } catch (e) {}
       var VH = { 'X-Api-Token': env.VTURB_TOKEN, 'X-Api-Version': 'v1', 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' };
       var byAdV = {};
       var _dbg = _u.searchParams.get('debug') === '1';
       try {
-        var plr = await fetch('https://analytics.vturb.net/players/list?start_date=' + encodeURIComponent(vsin) + '&end_date=' + encodeURIComponent(vunt) + '&timezone=America/Sao_Paulo', { headers: VH });
+        var plr = await fetch('https://analytics.vturb.net/players/list?start_date=' + encodeURIComponent(vplSin) + '&end_date=' + encodeURIComponent(vunt) + '&timezone=America/Sao_Paulo', { headers: VH });
         var _plrTxt = await plr.text();
         var players; try { players = JSON.parse(_plrTxt); } catch (e) { players = null; }
         if (_dbg || !Array.isArray(players)) {
