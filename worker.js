@@ -1458,10 +1458,17 @@ async function run(env, opts) {
      • Cooldown anti-ping-pong (coolMs) entre mudanças na MESMA campanha.
      • Só em `camps` (CBO vitalício). Pula CP_VALD (gestão manual) e NÃO toca DAILY_CAMPS.
      • Escreve só em applyMode=live; em dry só mostra no /run (DIAG.roasRule.wouldPause/wouldReact).
-     • ROAS = receita REAL do RedTrack (c._rev, fallback vendas×120) / gasto. */
+     • ROAS = receita REAL do RedTrack (c._rev, fallback vendas×120) / gasto.
+     • LIMIAR POR HORÁRIO (18/11, pedido Emerson): MADRUGADA 00h–08h BR = thrNight(2.0);
+       resto do dia 08h–00h = thrDay(1.5). Pausa abaixo / reativa acima do limiar DAQUELA hora.
+       Janela e limiares configuráveis: R_RR_ROAS(1.5), R_RR_ROAS_NIGHT(2.0), R_RR_NIGHT_START(0), R_RR_NIGHT_END(8). */
   try {
     var _rn = function (k, d) { var v = parseFloat(env[k]); return isFinite(v) ? v : d; };
-    var RR = { thr: _rn('R_RR_ROAS', 1.5), minSpend: _rn('R_RR_MINSPEND', 30), minSales: _rn('R_RR_MINSALES', 1), coolMs: _rn('R_RR_COOLDOWN', 60) * 60000, maxFlips: _rn('R_RR_MAXFLIPS', 20) };
+    var _rrHour = brHour();
+    var _rrNS = _rn('R_RR_NIGHT_START', 0), _rrNE = _rn('R_RR_NIGHT_END', 8);
+    var _rrNight = (_rrNS < _rrNE) ? (_rrHour >= _rrNS && _rrHour < _rrNE) : (_rrHour >= _rrNS || _rrHour < _rrNE);
+    var _rrThrDay = _rn('R_RR_ROAS', 1.5), _rrThrNight = _rn('R_RR_ROAS_NIGHT', 2.0);
+    var RR = { thr: _rrNight ? _rrThrNight : _rrThrDay, thrDay: _rrThrDay, thrNight: _rrThrNight, night: _rrNight, hour: _rrHour, winStart: _rrNS, winEnd: _rrNE, minSpend: _rn('R_RR_MINSPEND', 30), minSales: _rn('R_RR_MINSALES', 1), coolMs: _rn('R_RR_COOLDOWN', 60) * 60000, maxFlips: _rn('R_RR_MAXFLIPS', 20) };
     var rrLive = applyMode === 'live';
     var roboPaused = {}; try { var _rp = await env.RULES_KV.get('roboPaused'); if (_rp) { var _rpj = JSON.parse(_rp); if (_rpj && typeof _rpj === 'object') roboPaused = _rpj; } } catch (e) {}
     var rrLast = {}; try { var _rl = await env.RULES_KV.get('roasRuleAt'); if (_rl) { var _rlj = JSON.parse(_rl); if (_rlj && typeof _rlj === 'object') rrLast = _rlj; } } catch (e) {}
@@ -1508,9 +1515,10 @@ async function run(env, opts) {
       try { await env.RULES_KV.put('roboPaused', JSON.stringify(_cRP)); } catch (e) {}
       try { await env.RULES_KV.put('roasRuleAt', JSON.stringify(_cL)); } catch (e) {}
     }
-    DIAG.roasRule = { mode: applyMode, thr: RR.thr, minSpend: RR.minSpend, minSales: RR.minSales, cooldownMin: RR.coolMs / 60000, pausou: rrPaused.length, reativou: rrReact.length, wouldPause: rrWouldP.slice(0, 25), wouldReact: rrWouldR.slice(0, 25) };
-    if (rrLive && rrPaused.length && env.TG_TOKEN) await sendTelegram(env, '⏸️ PAUSADO por ROAS baixo (< ' + RR.thr + ') — ' + rrPaused.length + ' campanha(s):\n\n' + rrPaused.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)'; }).join('\n\n'));
-    if (rrLive && rrReact.length && env.TG_TOKEN) await sendTelegram(env, '▶️ REATIVADO — ROAS acima de ' + RR.thr + ' — ' + rrReact.length + ' campanha(s):\n\n' + rrReact.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)'; }).join('\n\n'));
+    DIAG.roasRule = { mode: applyMode, thr: RR.thr, thrDay: RR.thrDay, thrNight: RR.thrNight, night: RR.night, brHour: RR.hour, window: 'noite ' + RR.winStart + 'h-' + RR.winEnd + 'h BR', minSpend: RR.minSpend, minSales: RR.minSales, cooldownMin: RR.coolMs / 60000, pausou: rrPaused.length, reativou: rrReact.length, wouldPause: rrWouldP.slice(0, 25), wouldReact: rrWouldR.slice(0, 25) };
+    var _rrTag = RR.night ? ' 🌙madrugada' : '';
+    if (rrLive && rrPaused.length && env.TG_TOKEN) await sendTelegram(env, '⏸️ PAUSADO por ROAS baixo (< ' + RR.thr + _rrTag + ') — ' + rrPaused.length + ' campanha(s):\n\n' + rrPaused.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)'; }).join('\n\n'));
+    if (rrLive && rrReact.length && env.TG_TOKEN) await sendTelegram(env, '▶️ REATIVADO — ROAS acima de ' + RR.thr + _rrTag + ' — ' + rrReact.length + ' campanha(s):\n\n' + rrReact.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)'; }).join('\n\n'));
   } catch (e) { DIAG.roasRuleErr = String((e && e.message) || e); }
 
   var log = { at: new Date().toISOString(), mode: applyMode, mood: moodObj.mood, moodRoas: +moodObj.roas.toFixed(2), count: camps.length, diag: DIAG, actions: actions };
