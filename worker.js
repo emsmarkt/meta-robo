@@ -555,6 +555,8 @@ async function collect(env) {
     DIAG.rtError = (d && d.error) ? (d.error.message || JSON.stringify(d.error)) : null;
     DIAG.rtSampleKeys = (Array.isArray(rows) && rows[0]) ? Object.keys(rows[0]).slice(0, 30).join(',') : '';
     DIAG.rtSampleSub3 = (Array.isArray(rows) && rows[0]) ? rows[0].sub3 : null;
+    /* amostra dos campos de RECEITA do RedTrack (p/ diagnosticar se _rev vem do campo certo — comissão variável). */
+    if (Array.isArray(rows) && rows[0]) { var _sr = rows[0]; var _rk = {}; Object.keys(_sr).forEach(function (k) { if (/revenue|payout|conversion_revenue|sum/i.test(k)) _rk[k] = _sr[k]; }); DIAG.rtSampleRev = _rk; }
     /* fx (cambio ao vivo) ja definido no inicio da collect. */
     var pickNum = function(o, ks){ for (var i=0;i<ks.length;i++){ var v=o[ks[i]]; if (v!=null && v!=='' && !isNaN(parseFloat(v))) return parseFloat(v); } return 0; };
     var icType = env.RT_ICTYPE || '2';
@@ -1255,9 +1257,9 @@ async function run(env, opts) {
       var elapP = Date.now() - pausedAt[c.id];
       /* AVISO p/ REATIVAR: pausada ha >= pauseAlertMin(30) min E ROAS > reactRoas(1,4). ROAS = RECEITA REAL do
          RedTrack / gasto (o r.roas do suggestRule usa ×260 e dava ROAS FALSO inflado). Fallback vendas×120. */
-      var reactRev = (c._rev > 0) ? c._rev : ((c._sales || 0) * 120);
-      var reactRoasReal = (c._spendToday > 0) ? (reactRev / c._spendToday) : 0;
-      if (elapP >= RULES.pauseAlertMin * 60000 && reactRoasReal > RULES.reactRoas) {
+      var reactRev = c._rev || 0;   /* receita REAL do RedTrack (USD) — sem valor fixo de 120 */
+      var reactRoasReal = (c._spendToday > 0 && reactRev > 0) ? (reactRev / c._spendToday) : 0;
+      if (reactRev > 0 && elapP >= RULES.pauseAlertMin * 60000 && reactRoasReal > RULES.reactRoas) {
         reactList.push({ id: c.id, name: c.name, mins: Math.round(elapP / 60000), roas: +reactRoasReal.toFixed(2) });
       }
     }
@@ -1458,7 +1460,9 @@ async function run(env, opts) {
      • Cooldown anti-ping-pong (coolMs) entre mudanças na MESMA campanha.
      • Só em `camps` (CBO vitalício). Pula CP_VALD (gestão manual) e NÃO toca DAILY_CAMPS.
      • Escreve só em applyMode=live; em dry só mostra no /run (DIAG.roasRule.wouldPause/wouldReact).
-     • ROAS = receita REAL do RedTrack (c._rev, fallback vendas×120) / gasto.
+     • ROAS = receita REAL do RedTrack (c._rev, em USD) / gasto. SEM valor fixo por venda (18/11): comissão
+       varia ($120–$230), então usar 120 fixo distorcia o ROAS e pausava campanha boa / reativava ruim. Se a
+       receita real ainda não chegou (rev=0 com venda contada), o robô NÃO age (entra em DIAG.roasRule.noRev).
      • LIMIAR POR HORÁRIO (18/11, pedido Emerson): MADRUGADA 00h–08h BR = thrNight(2.0);
        resto do dia 08h–00h = thrDay(1.5). Pausa abaixo / reativa acima do limiar DAQUELA hora.
        Janela e limiares configuráveis: R_RR_ROAS(1.5), R_RR_ROAS_NIGHT(2.0), R_RR_NIGHT_START(0), R_RR_NIGHT_END(8). */
@@ -1472,18 +1476,21 @@ async function run(env, opts) {
     var rrLive = applyMode === 'live';
     var roboPaused = {}; try { var _rp = await env.RULES_KV.get('roboPaused'); if (_rp) { var _rpj = JSON.parse(_rp); if (_rpj && typeof _rpj === 'object') roboPaused = _rpj; } } catch (e) {}
     var rrLast = {}; try { var _rl = await env.RULES_KV.get('roasRuleAt'); if (_rl) { var _rlj = JSON.parse(_rl); if (_rlj && typeof _rlj === 'object') rrLast = _rlj; } } catch (e) {}
-    var rrNow = Date.now(), rrDirty = false, rrFlips = 0, rrPaused = [], rrReact = [], rrWouldP = [], rrWouldR = [];
+    var rrNow = Date.now(), rrDirty = false, rrFlips = 0, rrPaused = [], rrReact = [], rrWouldP = [], rrWouldR = [], rrNoRev = [];
     for (var ri = 0; ri < camps.length && rrFlips < RR.maxFlips; ri++) {
       var cc = camps[ri];
       if ((cc.name || '').toUpperCase().indexOf('VALD') >= 0) continue; /* CP_VALD = gestão manual */
       var st = (cc.effective_status || cc.status || '').toUpperCase();
       var sales = cc._sales || 0, spend = cc._spendToday || 0;
-      var rev = (cc._rev > 0) ? cc._rev : (sales * 120);
-      var roas = spend > 0 ? rev / spend : 0;
+      var rev = cc._rev || 0;                  /* RECEITA REAL do RedTrack (USD) — SEM valor fixo. Comissão varia ($120–$230). */
+      var hasRev = rev > 0;                     /* só decide com receita real; sem ela NÃO age (venda contada mas revenue não sincronizou ainda). */
+      var roas = (spend > 0 && hasRev) ? rev / spend : 0;
       var coolOk = (rrNow - (rrLast[cc.id] || 0)) >= RR.coolMs;
+      /* SEM receita real (rev=0) mas com venda contada: registra e NÃO toca (evita pausar boa / reativar ruim por falta de dado). */
+      if (sales >= RR.minSales && !hasRev) { rrNoRev.push(cc.name + ' (' + sales + 'v, gasto $' + Math.round(spend) + ' — receita RedTrack ainda 0)'); continue; }
       /* PAUSAR */
-      if (st === 'ACTIVE' && sales >= RR.minSales && spend >= RR.minSpend && roas < RR.thr) {
-        rrWouldP.push(cc.name + ' (ROAS ' + roas.toFixed(2) + ', ' + sales + 'v, $' + Math.round(spend) + ')');
+      if (st === 'ACTIVE' && sales >= RR.minSales && spend >= RR.minSpend && hasRev && roas < RR.thr) {
+        rrWouldP.push(cc.name + ' (ROAS ' + roas.toFixed(2) + ', ' + sales + 'v, receita $' + Math.round(rev) + ', gasto $' + Math.round(spend) + ')');
         if (!coolOk) continue;
         if (rrLive) {
           try { await withTokenFallback(tokens, cc._tk, (function (id) { return function (tk) { return postForm(id, tk, { status: 'PAUSED' }); }; })(cc.id)); }
@@ -1495,8 +1502,8 @@ async function run(env, opts) {
         continue;
       }
       /* REATIVAR (só as que o robô pausou) */
-      if (st !== 'ACTIVE' && roboPaused[cc.id] && sales >= RR.minSales && roas >= RR.thr) {
-        rrWouldR.push(cc.name + ' (ROAS ' + roas.toFixed(2) + ')');
+      if (st !== 'ACTIVE' && roboPaused[cc.id] && sales >= RR.minSales && hasRev && roas >= RR.thr) {
+        rrWouldR.push(cc.name + ' (ROAS ' + roas.toFixed(2) + ', receita $' + Math.round(rev) + ')');
         if (!coolOk) continue;
         if (rrLive) {
           try { await withTokenFallback(tokens, cc._tk, (function (id) { return function (tk) { return postForm(id, tk, { status: 'ACTIVE' }); }; })(cc.id)); }
@@ -1515,7 +1522,7 @@ async function run(env, opts) {
       try { await env.RULES_KV.put('roboPaused', JSON.stringify(_cRP)); } catch (e) {}
       try { await env.RULES_KV.put('roasRuleAt', JSON.stringify(_cL)); } catch (e) {}
     }
-    DIAG.roasRule = { mode: applyMode, thr: RR.thr, thrDay: RR.thrDay, thrNight: RR.thrNight, night: RR.night, brHour: RR.hour, window: 'noite ' + RR.winStart + 'h-' + RR.winEnd + 'h BR', minSpend: RR.minSpend, minSales: RR.minSales, cooldownMin: RR.coolMs / 60000, pausou: rrPaused.length, reativou: rrReact.length, wouldPause: rrWouldP.slice(0, 25), wouldReact: rrWouldR.slice(0, 25) };
+    DIAG.roasRule = { mode: applyMode, thr: RR.thr, thrDay: RR.thrDay, thrNight: RR.thrNight, night: RR.night, brHour: RR.hour, window: 'noite ' + RR.winStart + 'h-' + RR.winEnd + 'h BR', minSpend: RR.minSpend, minSales: RR.minSales, cooldownMin: RR.coolMs / 60000, pausou: rrPaused.length, reativou: rrReact.length, semReceita: rrNoRev.length, wouldPause: rrWouldP.slice(0, 25), wouldReact: rrWouldR.slice(0, 25), noRev: rrNoRev.slice(0, 25) };
     var _rrTag = RR.night ? ' 🌙madrugada' : '';
     if (rrLive && rrPaused.length && env.TG_TOKEN) await sendTelegram(env, '⏸️ PAUSADO por ROAS baixo (< ' + RR.thr + _rrTag + ') — ' + rrPaused.length + ' campanha(s):\n\n' + rrPaused.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)'; }).join('\n\n'));
     if (rrLive && rrReact.length && env.TG_TOKEN) await sendTelegram(env, '▶️ REATIVADO — ROAS acima de ' + RR.thr + _rrTag + ' — ' + rrReact.length + ' campanha(s):\n\n' + rrReact.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)'; }).join('\n\n'));
