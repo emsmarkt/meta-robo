@@ -559,6 +559,9 @@ async function collect(env) {
     if (Array.isArray(rows) && rows[0]) { var _sr = rows[0]; var _rk = {}; Object.keys(_sr).forEach(function (k) { if (/revenue|payout|conversion_revenue|sum/i.test(k)) _rk[k] = _sr[k]; }); DIAG.rtSampleRev = _rk; }
     /* fx (cambio ao vivo) ja definido no inicio da collect. */
     var pickNum = function(o, ks){ for (var i=0;i<ks.length;i++){ var v=o[ks[i]]; if (v!=null && v!=='' && !isNaN(parseFloat(v))) return parseFloat(v); } return 0; };
+    /* RECEITA: pega a 1a POSITIVA (o campo `revenue` do RedTrack vem SEMPRE 0; o valor real/variável está em
+       total_revenue / revenuetype{N}). pickNum não serve aqui porque aceitaria o 0 de `revenue`. */
+    var pickPos = function(o, ks){ for (var i=0;i<ks.length;i++){ var v=parseFloat(o[ks[i]]); if (isFinite(v) && v>0) return v; } return 0; };
     var icType = env.RT_ICTYPE || '2';
     var by = {}, byCost = {}, byClicks = {}, byIC = {}, byRev = {};
     (Array.isArray(rows) ? rows : []).forEach(function (row) {
@@ -570,7 +573,7 @@ async function collect(env) {
         byCost[String(row.sub3)] = pickNum(row, ['cost','total_cost','spend','ad_cost']);
         byClicks[String(row.sub3)] = pickNum(row, ['clicks']);
         byIC[String(row.sub3)] = parseInt(row['convtype' + icType]) || 0;
-        byRev[String(row.sub3)] = pickNum(row, ['revenue', 'revenuetype' + pType, 'total_revenue']); /* receita REAL (USD) p/ ROAS certo */
+        byRev[String(row.sub3)] = pickPos(row, ['total_revenue', 'revenuetype' + pType, 'revenue']); /* receita REAL VARIÁVEL (USD): total_revenue/revenuetype — NÃO o `revenue` que vem 0 */
       }
     });
     /* RedTrack fica SO p/ VENDAS e IC. GASTO e CLIQUES (de link) vem do Meta (batchTodayMeta).
@@ -628,8 +631,9 @@ async function collect(env) {
             if (row.sub3 == null) return;
             var s7 = parseInt(row['convtype' + pType7]) || parseInt(row.approved) || 0;
             var cst7 = 0; ['cost', 'total_cost', 'spend', 'ad_cost'].forEach(function (k) { if (!cst7 && row[k] != null && row[k] !== '') cst7 = parseFloat(row[k]) || 0; });
-            /* RedTrack já em USD: NÃO divide por fx. ROAS = receita REAL / custo (fallback vendas×120). */
-            var rev7 = parseFloat(row.revenue) || parseFloat(row['revenuetype' + pType7]) || parseFloat(row.total_revenue) || (s7 * 120);
+            /* RedTrack já em USD: NÃO divide por fx. ROAS = receita REAL / custo. SEM valor fixo: usa
+               total_revenue/revenuetype (o `revenue` vem 0). */
+            var rev7 = parseFloat(row.total_revenue) || parseFloat(row['revenuetype' + pType7]) || parseFloat(row.revenue) || 0;
             if (cst7 > 0) { map7[String(row.sub3)] = rev7 / cst7; }
           });
           camps.forEach(function (c) { c._roas7d = map7[String(c.id)] || 0; });
