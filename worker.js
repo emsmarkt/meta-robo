@@ -45,7 +45,7 @@ var RULES = {
   remLimRoas: 1.5, remLimStart: 10, remLimEnd: 23, // robo REMOVE o limite sozinho se ROAS > 1,5 entre remLimStart(10h) e remLimEnd(23h) BR (campanha recuperou).
   pauseRoas: 1.5, escRoas: 1.7, escPct: 0.20, pauseSalesBreak: 3, // ACOMPANHAR enquanto 1,3 < ROAS < 1,5 (01/10). escRoas (reativa/AUMENTA) segue 1,7
   critRoas: 1.4, critMinSpend: 50, critMinSales: 2, // 🔴 ROAS CRÍTICO (30/10): campanha ATIVA, gasto > critMinSpend($50), ROAS < 1,4 E >= critMinSales(2) vendas -> aviso Telegram + visual. SEM venda NÃO entra aqui (vai p/ noSaleSpend).
-  noSaleSpend: 80, // 🛑 SEM VENDA (30/10): campanha ATIVA, 0 venda e gasto >= $80 -> aviso Telegram p/ PAUSAR/analisar.
+  noSaleSpend: 60, // 🛑 SEM VENDA: campanha ATIVA, 0 venda e gasto >= $60 (20/11, era $80) -> em LIVE o robô PAUSA de vez; em DRY avisa no Telegram p/ pausar na mão.
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
   /* AUMENTAR (so SUGESTAO): so apos aumHourBR(20h) BR, ROAS de HOJE >= pauseRoas(1,5) E ROAS dos ult. 7 dias > aumRoas7dMin(1,4) -> subir o diario p/ aumMult(1,5)x o atual.
@@ -79,7 +79,7 @@ function buildRules(env) {
     restoreRoas: n('R_RESTOREROAS', 1.5),
     dailyAlertSpend: n('R_DAILYSPEND', 100), dailyAlertCpc: n('R_DAILYCPC', 2), dailyAlertCpi: n('R_DAILYCPI', 55),
     pauseRoas: n('R_PAUSEROAS', 1.5), escRoas: n('R_ESCROAS', 1.7), escPct: n('R_ESCPCT', 0.20), pauseSalesBreak: n('R_PAUSESALESBREAK', 3),
-    critRoas: n('R_CRITROAS', 1.4), critMinSpend: n('R_CRITMINSPEND', 50), critMinSales: n('R_CRITMINSALES', 2), noSaleSpend: n('R_NOSALESPEND', 80),
+    critRoas: n('R_CRITROAS', 1.4), critMinSpend: n('R_CRITMINSPEND', 50), critMinSales: n('R_CRITMINSALES', 2), noSaleSpend: n('R_NOSALESPEND', 60),
     limSpendTrigger: n('R_LIMTRIG', 90), limSpendCap: n('R_LIMCAP', 120),
     limRoas: n('R_LIMROAS', 1.5), limMinSpend: n('R_LIMMINSPEND', 1),
     remLimRoas: n('R_REMLIMROAS', 1.5), remLimStart: n('R_REMLIMSTART', 10), remLimEnd: n('R_REMLIMEND', 23),
@@ -1103,6 +1103,22 @@ async function run(env, opts) {
      Assim o modo sobrevive a deploy (o toml nao reverte mais) e o usuario liga/desliga o "live" pela tela. */
   var applyMode = env.APPLY_MODE === 'live' ? 'live' : 'dry';
   try { var am2 = await env.RULES_KV.get('applyMode'); if (am2 === 'live' || am2 === 'dry') applyMode = am2; } catch (e) {}
+  /* 🕛 AUTO-LIGAR o interruptor à MEIA-NOITE BRT (pedido 20/11): na 1a rodada da hora 0 (00h–00h59 São Paulo,
+     GMT-3) de cada dia, liga o robô (applyMode=live no KV). Dedup por dia (KV `autoLiveDay`): se o Emerson
+     DESLIGAR depois, NÃO re-liga até a próxima meia-noite. Env `R_AUTOLIVE='off'` desativa este automatismo. */
+  var _autoLive = null;
+  try {
+    if ((env.R_AUTOLIVE || 'on') !== 'off' && new Date(Date.now() - 3 * 3600000).getUTCHours() === 0) {
+      var _alToday = brDatePlus(0);
+      var _alPrev = null; try { _alPrev = await env.RULES_KV.get('autoLiveDay'); } catch (e) {}
+      if (_alPrev !== _alToday) {
+        try { await env.RULES_KV.put('autoLiveDay', _alToday); } catch (e) {}
+        try { await env.RULES_KV.put('applyMode', 'live'); applyMode = 'live'; } catch (e) {}
+        _autoLive = { ligou: true, dia: _alToday };
+        if (env.TG_TOKEN) { try { await sendTelegram(env, '🟢 Robô LIGADO automaticamente (meia-noite BRT) — regras em modo LIVE.'); } catch (e) {} }
+      }
+    }
+  } catch (e) {}
 
   var tokens = JSON.parse(env.META_TOKENS || '[]');
   var camps = await collect(env);
@@ -1112,6 +1128,7 @@ async function run(env, opts) {
      MANUALMENTE pelo dashboard. O robo NAO mexe mais em orcamento por horario. */
   var schedRes = null;
   DIAG.sched = 'resets de orcamento REMOVIDOS (ajuste manual pelo dashboard)';
+  if (_autoLive) DIAG.autoLive = _autoLive;
   /* Mapa da ULTIMA regra aplicada por campanha (compartilhado c/ o dashboard). Usado p/ NAO
      reaplicar a MESMA regra consecutivamente (ex: LIMITAR nao repete enquanto a campanha fica
      na faixa). Se ela MUDAR de regra (ex: vira ESCALAR) e DEPOIS voltar pra LIMITAR, reaplica,
@@ -1310,6 +1327,7 @@ async function run(env, opts) {
          Substitui o antigo CRÍTICO-sem-venda (que disparava com qualquer gasto > $50). De hora em hora. */
       var linesNS = [];
       (camps.concat(DAILY_CAMPS)).forEach(function (c) {
+        if (applyMode === 'live') return; /* em LIVE o robô PAUSA sozinho (roasRule) + manda "🛑 PAUSADO SEM venda" — este aviso é só p/ DRY. */
         if ((c.effective_status || c.status || '').toUpperCase() !== 'ACTIVE') return;
         if ((c._sales || 0) > 0) return; /* só SEM venda */
         var nsp = c._spendToday || 0; if (nsp < RULES.noSaleSpend) return;
@@ -1476,7 +1494,7 @@ async function run(env, opts) {
     var _rrNS = _rn('R_RR_NIGHT_START', 0), _rrNE = _rn('R_RR_NIGHT_END', 8);
     var _rrNight = (_rrNS < _rrNE) ? (_rrHour >= _rrNS && _rrHour < _rrNE) : (_rrHour >= _rrNS || _rrHour < _rrNE);
     var _rrThrDay = _rn('R_RR_ROAS', 1.5), _rrThrNight = _rn('R_RR_ROAS_NIGHT', 2.0);
-    var RR = { thr: _rrNight ? _rrThrNight : _rrThrDay, thrDay: _rrThrDay, thrNight: _rrThrNight, night: _rrNight, hour: _rrHour, winStart: _rrNS, winEnd: _rrNE, minSpend: _rn('R_RR_MINSPEND', 30), minSales: _rn('R_RR_MINSALES', 1), coolMs: _rn('R_RR_COOLDOWN', 60) * 60000, maxFlips: _rn('R_RR_MAXFLIPS', 20) };
+    var RR = { thr: _rrNight ? _rrThrNight : _rrThrDay, thrDay: _rrThrDay, thrNight: _rrThrNight, night: _rrNight, hour: _rrHour, winStart: _rrNS, winEnd: _rrNE, minSpend: _rn('R_RR_MINSPEND', 30), minSales: _rn('R_RR_MINSALES', 1), coolMs: _rn('R_RR_COOLDOWN', 60) * 60000, maxFlips: _rn('R_RR_MAXFLIPS', 20), noSale: RULES.noSaleSpend };
     var rrLive = applyMode === 'live';
     var roboPaused = {}; try { var _rp = await env.RULES_KV.get('roboPaused'); if (_rp) { var _rpj = JSON.parse(_rp); if (_rpj && typeof _rpj === 'object') roboPaused = _rpj; } } catch (e) {}
     var rrLast = {}; try { var _rl = await env.RULES_KV.get('roasRuleAt'); if (_rl) { var _rlj = JSON.parse(_rl); if (_rlj && typeof _rlj === 'object') rrLast = _rlj; } } catch (e) {}
@@ -1492,6 +1510,21 @@ async function run(env, opts) {
       var coolOk = (rrNow - (rrLast[cc.id] || 0)) >= RR.coolMs;
       /* SEM receita real (rev=0) mas com venda contada: registra e NÃO toca (evita pausar boa / reativar ruim por falta de dado). */
       if (sales >= RR.minSales && !hasRev) { rrNoRev.push(cc.name + ' (' + sales + 'v, gasto $' + Math.round(spend) + ' — receita RedTrack ainda 0)'); continue; }
+      /* 🛑 PAUSAR SEM VENDA: ACTIVE, 0 venda hoje, gasto >= RR.noSale ($60) e RedTrack OK no ciclo -> PAUSA de vez.
+         Precisa cc._rtOk (se a busca do RedTrack falhou, vendas=0 é falso e pausaria todo mundo). NÃO reativa
+         sozinho (a reativação exige venda, que campanha pausada não tem). Respeita cooldown/maxFlips. */
+      if (st === 'ACTIVE' && sales === 0 && cc._rtOk && spend >= RR.noSale) {
+        rrWouldP.push(cc.name + ' (SEM venda, gasto $' + Math.round(spend) + ' >= $' + RR.noSale + ')');
+        if (!coolOk) continue;
+        if (rrLive) {
+          try { await withTokenFallback(tokens, cc._tk, (function (id) { return function (tk) { return postForm(id, tk, { status: 'PAUSED' }); }; })(cc.id)); }
+          catch (eNS) { DIAG.rrErr = String((eNS && eNS.message) || eNS); continue; }
+          roboPaused[cc.id] = { ts: rrNow, day: today, name: cc.name, noSale: true }; rrLast[cc.id] = rrNow; rrDirty = true;
+          await new Promise(function (r) { setTimeout(r, 250); });
+        }
+        rrFlips++; rrPaused.push({ name: cc.name, roas: 0, spend: Math.round(spend), sales: 0, noSale: true });
+        continue;
+      }
       /* PAUSAR */
       if (st === 'ACTIVE' && sales >= RR.minSales && spend >= RR.minSpend && hasRev && roas < RR.thr) {
         rrWouldP.push(cc.name + ' (ROAS ' + roas.toFixed(2) + ', ' + sales + 'v, receita $' + Math.round(rev) + ', gasto $' + Math.round(spend) + ')');
@@ -1526,9 +1559,12 @@ async function run(env, opts) {
       try { await env.RULES_KV.put('roboPaused', JSON.stringify(_cRP)); } catch (e) {}
       try { await env.RULES_KV.put('roasRuleAt', JSON.stringify(_cL)); } catch (e) {}
     }
-    DIAG.roasRule = { mode: applyMode, thr: RR.thr, thrDay: RR.thrDay, thrNight: RR.thrNight, night: RR.night, brHour: RR.hour, window: 'noite ' + RR.winStart + 'h-' + RR.winEnd + 'h BR', minSpend: RR.minSpend, minSales: RR.minSales, cooldownMin: RR.coolMs / 60000, pausou: rrPaused.length, reativou: rrReact.length, semReceita: rrNoRev.length, wouldPause: rrWouldP.slice(0, 25), wouldReact: rrWouldR.slice(0, 25), noRev: rrNoRev.slice(0, 25) };
+    DIAG.roasRule = { mode: applyMode, thr: RR.thr, thrDay: RR.thrDay, thrNight: RR.thrNight, night: RR.night, brHour: RR.hour, window: 'noite ' + RR.winStart + 'h-' + RR.winEnd + 'h BR', minSpend: RR.minSpend, minSales: RR.minSales, noSale: RR.noSale, cooldownMin: RR.coolMs / 60000, pausou: rrPaused.length, reativou: rrReact.length, semReceita: rrNoRev.length, wouldPause: rrWouldP.slice(0, 25), wouldReact: rrWouldR.slice(0, 25), noRev: rrNoRev.slice(0, 25) };
     var _rrTag = RR.night ? ' 🌙madrugada' : '';
-    if (rrLive && rrPaused.length && env.TG_TOKEN) await sendTelegram(env, '⏸️ PAUSADO por ROAS baixo (< ' + RR.thr + _rrTag + ') — ' + rrPaused.length + ' campanha(s):\n\n' + rrPaused.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)'; }).join('\n\n'));
+    var _rrPRoas = rrPaused.filter(function (x) { return !x.noSale; });
+    var _rrPNoSale = rrPaused.filter(function (x) { return x.noSale; });
+    if (rrLive && _rrPRoas.length && env.TG_TOKEN) await sendTelegram(env, '⏸️ PAUSADO por ROAS baixo (< ' + RR.thr + _rrTag + ') — ' + _rrPRoas.length + ' campanha(s):\n\n' + _rrPRoas.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)'; }).join('\n\n'));
+    if (rrLive && _rrPNoSale.length && env.TG_TOKEN) await sendTelegram(env, '🛑 PAUSADO SEM venda (gasto ≥ $' + RR.noSale + ', 0 venda) — ' + _rrPNoSale.length + ' campanha(s):\n\n' + _rrPNoSale.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   gasto $' + x.spend + ' · 0 venda'; }).join('\n\n'));
     if (rrLive && rrReact.length && env.TG_TOKEN) await sendTelegram(env, '▶️ REATIVADO — ROAS acima de ' + RR.thr + _rrTag + ' — ' + rrReact.length + ' campanha(s):\n\n' + rrReact.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)'; }).join('\n\n'));
   } catch (e) { DIAG.roasRuleErr = String((e && e.message) || e); }
 
@@ -1583,6 +1619,24 @@ async function wpEncrypt(p256dhB64, authB64, payloadBytes){
   var cipher = new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM', iv:nonce, tagLength:128}, aesKey, content));
   return wpCat([salt, new Uint8Array([0,0,0x10,0x00]), new Uint8Array([asPub.length]), asPub, cipher]);
 }
+/* ============================================================================
+   🔑 CHAVES VAPID — LEIA ANTES DE DEPLOYAR (evita o push parar de novo)
+   ----------------------------------------------------------------------------
+   A chave PÚBLICA fica FIXA aqui embaixo (VAPID_PUBLIC_DEFAULT). Ela é PÚBLICA,
+   não é segredo — pode ficar no código/repo. Assim um deploy pelo GitHub NUNCA
+   mais zera a pública (era isso que derrubava o push: a var sumia no deploy).
+
+   A chave PRIVADA (VAPID_PRIVATE_JWK) é SECRETA e o repo `meta-robo` é PÚBLICO —
+   então ela NÃO pode ser escrita aqui. Setar na Cloudflare como SECRET (encriptado):
+     Workers → meta-robo → Settings → Variables and Secrets → Add → tipo "Secret"
+       Nome:  VAPID_PRIVATE_JWK
+       Valor: { "kty":"EC","crv":"P-256","d":"...","x":"...","y":"..." }   (JWK)
+   Secret SOBREVIVE a deploy (diferente de var comum). É por isso que, mesmo
+   subindo pelo GitHub, ela não some mais. NÃO colar a privada neste arquivo.
+   (Opcional: VAPID_SUBJECT = mailto: ou URL do site; já tem default.)
+   ============================================================================ */
+var VAPID_PUBLIC_DEFAULT = 'BG1w7yofw0vbpCIJkcd6xSbGOuXsrY35s5Ww5jzWI7dDTglApdYoJQ97PhZg1P897BhIJ5-x9Mw91zqJ6PYCUBw';
+function vapidPub(env){ return (env && env.VAPID_PUBLIC) ? env.VAPID_PUBLIC : VAPID_PUBLIC_DEFAULT; }
 async function wpVapid(env, endpoint){
   var aud = new URL(endpoint).origin;
   var header = bytesToB64u(wpStr(JSON.stringify({typ:'JWT', alg:'ES256'})));
@@ -1591,11 +1645,12 @@ async function wpVapid(env, endpoint){
   var jwk = (typeof env.VAPID_PRIVATE_JWK === 'string') ? JSON.parse(env.VAPID_PRIVATE_JWK) : env.VAPID_PRIVATE_JWK;
   var key = await crypto.subtle.importKey('jwk', { kty:'EC', crv:'P-256', d:jwk.d, x:jwk.x, y:jwk.y, ext:true }, {name:'ECDSA', namedCurve:'P-256'}, false, ['sign']);
   var sig = await crypto.subtle.sign({name:'ECDSA', hash:'SHA-256'}, key, wpStr(signingInput));
-  return 'vapid t=' + signingInput + '.' + bytesToB64u(sig) + ', k=' + env.VAPID_PUBLIC;
+  return 'vapid t=' + signingInput + '.' + bytesToB64u(sig) + ', k=' + vapidPub(env);
 }
 async function sendWebPush(env, sub, payloadObj){
   try {
-    if (!env.VAPID_PRIVATE_JWK || !env.VAPID_PUBLIC) return { err:'no vapid' };
+    /* Pública tem default no código; só a PRIVADA (Secret) é obrigatória. */
+    if (!env.VAPID_PRIVATE_JWK) return { err:'no vapid (falta VAPID_PRIVATE_JWK como Secret na Cloudflare)' };
     var body = await wpEncrypt(sub.keys.p256dh, sub.keys.auth, wpStr(JSON.stringify(payloadObj)));
     var auth = await wpVapid(env, sub.endpoint);
     var r = await fetch(sub.endpoint, { method:'POST', headers: { 'Authorization': auth, 'Content-Encoding':'aes128gcm', 'Content-Type':'application/octet-stream', 'TTL':'86400' }, body: body });
@@ -1724,12 +1779,18 @@ export default {
             src: srcv, utmSrc: utmSrc, utmc: utmc, utmMed: utmMed, utmct: utmct, utmTerm: utmTerm, createdAt: nowBR, co: co
           }));
         }
-        /* 🔔 WEB PUSH no celular (app fechado) — só VENDA real (não estorno). Produto + comissão + valor da venda. */
+        /* 🔔 WEB PUSH no celular (app fechado) — só VENDA real (não estorno).
+           RÓTULO = nome do PRODUTO (products[].name da plataforma) ou, se faltar, o NICHO tirado do nome da
+           campanha (o [TAG] logo antes do [PAÍS], ex.: [PROST] [US] -> "PROST"). NUNCA a plataforma (plat). */
         if (!refund) {
           var saleVal = parseFloat(q.get('total_price') || q.get('transaction_amount') || q.get('amount_total') || '0') || 0;
           var wpMoney = function(v){ return (cur === 'BRL' ? 'R$ ' : 'US$ ') + (Number(v)||0).toLocaleString('pt-BR', { minimumFractionDigits:2, maximumFractionDigits:2 }); };
-          var wpBody = (prodName ? prodName + ' · ' : '') + 'comissão ' + wpMoney(amount) + (saleVal > 0 ? ' · venda ' + wpMoney(saleVal) : '');
-          ctx.waitUntil(pushAll(env, { title: '💰 Nova venda!', body: wpBody, url: '/', tag: 'sale-' + saleId }));
+          var _nomeCamp = (utmc.indexOf('|') >= 0 ? utmc.split('|').slice(0, -1).join('|') : utmc).trim(); /* NOME (sem o |ID do fim) */
+          var _nicheM = _nomeCamp.match(/\[([^\]\[]{2,30})\]\s*\[(?:US|CA|AU|NZ|UK|EUA|BR|[A-Z]{2}(?:\|[A-Z]{2})*)\]/i);
+          var _label = (prodName || (_nicheM ? _nicheM[1].trim() : '')).toString().slice(0, 40);
+          var wpTitle = '💰 Nova venda!' + (_label ? ' · ' + _label : '');
+          var wpBody = (_label ? _label + ' · ' : '') + 'comissão ' + wpMoney(amount) + (saleVal > 0 ? ' · venda ' + wpMoney(saleVal) : '');
+          ctx.waitUntil(pushAll(env, { title: wpTitle, body: wpBody, url: '/', tag: 'sale-' + saleId }));
         }
       }
       return new Response('OK', { headers: CORS }); /* JVZoo/Cartpanda só querem um 200 */
