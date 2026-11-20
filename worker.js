@@ -1635,6 +1635,36 @@ export default {
     if (path === '/pb' || path.indexOf('/pb/') === 0) {
       var q = _u.searchParams;
       if (env.PB_KEY && q.get('k') !== env.PB_KEY && path.indexOf('/pb/' + env.PB_KEY) !== 0) return new Response('forbidden', { status: 403, headers: CORS });
+      /* ===== WEBHOOK HW (JSON POST, "todos eventos") =====
+         A HW manda TODOS os eventos como JSON no corpo. Aqui tratamos SÓ o "Entrou no checkout" (IC) — a VENDA
+         continua vindo pelo postback GET "Scalefy" (evitando contagem dupla). Enquanto calibramos os nomes dos
+         campos, guardamos o payload CRU em `pbhookraw:*` (3 dias) p/ inspecionar via /pbhookraw e extrair certo.
+         NÃO grava venda/push a partir do POST (evita lixo de $0 e duplicidade). */
+      if (request.method === 'POST') {
+        var hraw = ''; try { hraw = await request.text(); } catch (e) {}
+        var hb = null; try { hb = JSON.parse(hraw); } catch (e) {}
+        var hts = Date.now();
+        try { await env.RULES_KV.put('pbhookraw:' + hts + ':' + Math.random().toString(36).slice(2, 7), (hraw || '').slice(0, 8000), { expirationTtl: 3 * 86400 }); } catch (e) {}
+        /* Detecção best-effort do "Entrou no checkout" (vários nomes possíveis); grava IC se der p/ achar campanha. */
+        try {
+          var evName = String((hb && (hb.event || hb.type || hb.event_name || hb.eventType || (hb.data && hb.data.event))) || '').toLowerCase();
+          var isCheckout = /checkout|entrou no checkout|initiate|order[_\s-]?form|cart/.test(evName);
+          if (isCheckout) {
+            var deep = function (o, keys) { if (!o || typeof o !== 'object') return ''; for (var kk in o) { if (!Object.prototype.hasOwnProperty.call(o, kk)) continue; var lk = kk.toLowerCase(); for (var j = 0; j < keys.length; j++) { if (lk === keys[j]) { var vv = o[kk]; if (vv != null && typeof vv !== 'object') return String(vv); } } if (o[kk] && typeof o[kk] === 'object') { var r = deep(o[kk], keys); if (r) return r; } } return ''; };
+            var utmcH = deep(hb, ['utm_campaign', 'utmcampaign', 'campaign']);
+            try { if (/%[0-9a-f]{2}/i.test(utmcH)) utmcH = decodeURIComponent(utmcH); } catch (e) {}
+            utmcH = utmcH.replace(/%7C/ig, '|');
+            var campIdH = (utmcH.split('|').pop() || '').trim();
+            var sessH = deep(hb, ['id', 'session_id', 'sessionid', 'hcid', 'checkout_id', 'lead_id', 'order_id']) || ('h' + hts);
+            if (campIdH && /^\d{4,}$/.test(campIdH)) {
+              var dayH = brDatePlus(0);
+              var kicH = 'pbic:' + dayH + ':' + campIdH + ':' + sessH.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48);
+              try { await env.RULES_KV.put(kicH, '1', { expirationTtl: 70 * 86400, metadata: { c: campIdH, src: 'hook' } }); } catch (e) {}
+            }
+          }
+        } catch (e) {}
+        return new Response('OK', { headers: CORS });
+      }
       var utmc = q.get('utm_campaign') || '';
       try { if (/%[0-9a-f]{2}/i.test(utmc)) utmc = decodeURIComponent(utmc); } catch (e) {} /* caso venha codificado (%7C) */
       utmc = utmc.replace(/%7C/ig, '|');
@@ -1656,8 +1686,12 @@ export default {
       var cur = (q.get('currency') || 'USD').toString();
       var isTest = (q.get('is_test') || '').toString();
       var refund = /refund|chargeback|rfnd|cgbk|estorn|reembols|cancel|dispute|charge_back/.test(type);
-      /* IC (InitiateCheckout / "order form visit") pela PLATAFORMA — SEM pixel. A plataforma dispara um
-         postback de checkout p/ o mesmo worker; marcamos com type/event=checkout (ou ic=1). Aceita vários nomes. */
+      /* IC (InitiateCheckout / "order form visit") pela PLATAFORMA (HW) — SEM pixel/VTurb. A plataforma dispara
+         um postback SEPARADO de checkout p/ este worker apontando p/ ...?ev=ic (ou ev=icq p/ IC QUALIFICADO).
+         Também aceita event=, ic=1, icq=1 e nomes comuns (checkout/initiate/order_form/cart). NÃO é venda. */
+      var evv = (q.get('ev') || q.get('event') || '').toString().toLowerCase();
+      var isICq = evv === 'icq' || /qualif/.test(evv) || /^(1|true|yes|sim)$/i.test(q.get('icq') || '');
+      var isIC  = isICq || evv === 'ic' || /checkout|initiate|order[_-]?form|cart/.test(evv) || /^(1|true|yes|sim)$/i.test(q.get('ic') || '');
       /* Campos extras p/ UTMify (atribuição por conjunto/anúncio): conjunto=utm_medium, origem=utm_source, termo, src, produto. */
       var utmMed = (q.get('utm_medium') || '').toString();
       var utmSrc = (q.get('utm_source') || 'FB').toString();
@@ -1667,7 +1701,14 @@ export default {
       if (!/^(1|true|yes|sim)$/i.test(isTest)) {
         /* data: hoje (BR) por padrão; backfill pode mandar ?day=YYYY-MM-DD p/ a data histórica da venda. */
         var day = /^\d{4}-\d{2}-\d{2}$/.test(q.get('day') || '') ? q.get('day') : brDatePlus(0);
-        /* CHECKOUT (IC): grava em pbic (não é venda) e sai. Dedup por vid/visitor/saleId. */
+        /* CHECKOUT (IC/IC qualificado): grava em pbic (NÃO é venda) e sai. Dedup por vid/visitor/order. */
+        if (isIC) {
+          var vidI = (q.get('vid') || q.get('visitor') || q.get('visitor_id') || saleId).toString().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48);
+          var kic = 'pbic:' + day + ':' + (campId || '0') + ':' + vidI;
+          var mdic = { c: campId }; if (isICq) mdic.q = 1; if (adId) mdic.ad = adId; if (co) mdic.co = co;
+          try { await env.RULES_KV.put(kic, isICq ? 'q' : '1', { expirationTtl: 70 * 86400, metadata: mdic }); } catch (e) {}
+          return new Response('OK', { headers: CORS });
+        }
         var amt = refund ? -Math.abs(amount) : amount;
         var rec = { camp: campId, amt: amt, cur: cur, type: type, plat: plat, refund: refund, utmc: utmc, utmct: utmct, ad: adId, co: co, sale: saleId, ts: Date.now() };
         var key = 'pbsale:' + day + ':' + saleId + ':' + (refund ? 'r' : 's');
@@ -1738,7 +1779,21 @@ export default {
             cursor = lst.list_complete ? null : lst.cursor;
           } while (cursor);
         }
-        /* IC NÃO vem daqui (vem da VTurb /vturbic). Removido o loop de pbic que derrubava a leitura. */
+        /* IC da PLATAFORMA (HW) via postback -> pbic:<dia>:<camp>:<vid>. Conta 1 por chave; metadata q=1 => QUALIFICADO. */
+        for (var dj = 0; dj < days.length; dj++) {
+          var cur2 = undefined;
+          do {
+            var lst2 = await env.RULES_KV.list({ prefix: 'pbic:' + days[dj] + ':', cursor: cur2, limit: 1000 });
+            (lst2.keys || []).forEach(function (kk) {
+              var md2 = kk.metadata || {};
+              var c2 = (md2.c != null && md2.c !== '') ? md2.c : '(sem campanha)';
+              if (!byCamp[c2]) byCamp[c2] = { sales: 0, revenue: 0, ic: 0 };
+              byCamp[c2].ic = (byCamp[c2].ic || 0) + 1;
+              if (md2.q) byCamp[c2].icq = (byCamp[c2].icq || 0) + 1;
+            });
+            cur2 = lst2.list_complete ? null : lst2.cursor;
+          } while (cur2);
+        }
         return jsonResp({ byCamp: byCamp, days: days.length });
       } catch (e) {
         return jsonResp({ byCamp: {}, err: 'pbsales: ' + String((e && e.message) || e) });
@@ -1820,6 +1875,25 @@ export default {
       } while (rcur && n < 300);
       recs.sort(function (a, b) { return (a.hora_BR < b.hora_BR) ? -1 : 1; });
       return jsonResp({ day: rday, total: recs.length, vendas: recs });
+    }
+    /* DEBUG: últimos payloads CRUS do WEBHOOK da HW (JSON POST em /pb). Serve p/ ver o formato real do evento
+       "Entrou no checkout" (nome do evento, utm_campaign, id de sessão) e então travar a extração do IC. */
+    if (path === '/pbhookraw') {
+      var hrecs = [], hcur = undefined, hn = 0;
+      do {
+        var hl = await env.RULES_KV.list({ prefix: 'pbhookraw:', cursor: hcur, limit: 1000 });
+        for (var hi = 0; hi < (hl.keys || []).length && hn < 50; hi++) {
+          var hk = hl.keys[hi];
+          var hv = null; try { hv = await env.RULES_KV.get(hk.name); } catch (e) {}
+          var hj = null; try { hj = JSON.parse(hv); } catch (e) {}
+          var hms = parseInt((hk.name.split(':')[1] || '0'));
+          hrecs.push({ ts_BR: isFinite(hms) ? new Date(hms - 3 * 3600000).toISOString().slice(0, 19).replace('T', ' ') : '?', body: hj || hv });
+          hn++;
+        }
+        hcur = hl.list_complete ? null : hl.cursor;
+      } while (hcur && hn < 50);
+      hrecs.sort(function (a, b) { return a.ts_BR < b.ts_BR ? 1 : -1; });
+      return jsonResp({ total: hrecs.length, hooks: hrecs });
     }
     /* IC (clique no botão da VSL) direto da VTURB, por AD (utm_content). O Meta às vezes não marca IC;
        a VTurb marca o clique no botão. Soma `total_clicked` de TODOS os vídeos, agrupado por utm_content,
