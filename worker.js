@@ -54,7 +54,7 @@ var RULES = {
   /* minutos de CACHE (KV) do ROAS 7 dias — evita o 429 do RedTrack (2 chamadas/ciclo a cada 5 min). */
   roas7dTtlMin: 60,
   alert3dRoas: 1.0, alert3dMinSpend: 150,
-  pauseCpc: 3, pauseSpend: 60, pauseAlertMin: 30, reactRoas: 1.4,  // AVISO REATIVAR: pausada ha >= pauseAlertMin(30) min E ROAS > reactRoas(1,4) -> Telegram (qualquer pausa, robo ou manual)
+  pauseCpc: 3, pauseSpend: 60, pauseAlertMin: 30, reactRoas: 1.6,  // AVISO REATIVAR: pausada ha >= pauseAlertMin(30) min E ROAS > reactRoas(1,6; era 1,4 — 22/11) -> Telegram (qualquer pausa, robo ou manual)
   alertRepeatMin: 30,  // repete o MESMO aviso Telegram da campanha SO a cada X min enquanto o estado durar (30 min = pedido 24/07)
   cooldownMin: 5       // minutos entre 2 aplicacoes na MESMA campanha (configuravel via R_COOLDOWN). = 1 ciclo do cron
 };
@@ -89,7 +89,7 @@ function buildRules(env) {
     roas7dTtlMin: n('R_ROAS7DTTL', 60),
     scaleUsePct: n('R_SCALEUSEPCT', 0.2), releaseDaily: n('R_RELEASE', 500),
     alert3dRoas: n('R_ALERT3DROAS', 1.0), alert3dMinSpend: n('R_ALERT3DSPEND', 150),
-    pauseCpc: n('R_PAUSECPC', 3), pauseSpend: n('R_PAUSESPEND', 60), pauseAlertMin: n('R_PAUSEALERTMIN', 30), reactRoas: n('R_REACTROAS', 1.4), alertRepeatMin: n('R_ALERTREPEAT', 30),
+    pauseCpc: n('R_PAUSECPC', 3), pauseSpend: n('R_PAUSESPEND', 60), pauseAlertMin: n('R_PAUSEALERTMIN', 30), reactRoas: n('R_REACTROAS', 1.6), alertRepeatMin: n('R_ALERTREPEAT', 30),
     cooldownMin: n('R_COOLDOWN', 5)
   };
 }
@@ -1487,18 +1487,18 @@ async function run(env, opts) {
        receita real ainda não chegou (rev=0 com venda contada), o robô NÃO age (entra em DIAG.roasRule.noRev).
      • LIMIAR POR HORÁRIO (18/11, pedido Emerson): MADRUGADA 00h–08h BR = thrNight(2.0);
        resto do dia 08h–00h = thrDay(1.5). Pausa abaixo / reativa acima do limiar DAQUELA hora.
-       Janela e limiares configuráveis: R_RR_ROAS(1.5), R_RR_ROAS_NIGHT(2.0), R_RR_NIGHT_START(0), R_RR_NIGHT_END(8). */
+       Janela e limiares configuráveis: R_RR_ROAS(1.6 dia 08h-00h), R_RR_ROAS_NIGHT(2.0 madrugada 00h-08h), R_RR_NIGHT_START(0), R_RR_NIGHT_END(8). */
   try {
     var _rn = function (k, d) { var v = parseFloat(env[k]); return isFinite(v) ? v : d; };
     var _rrHour = brHour();
     var _rrNS = _rn('R_RR_NIGHT_START', 0), _rrNE = _rn('R_RR_NIGHT_END', 8);
     var _rrNight = (_rrNS < _rrNE) ? (_rrHour >= _rrNS && _rrHour < _rrNE) : (_rrHour >= _rrNS || _rrHour < _rrNE);
-    var _rrThrDay = _rn('R_RR_ROAS', 1.5), _rrThrNight = _rn('R_RR_ROAS_NIGHT', 2.0);
+    var _rrThrDay = _rn('R_RR_ROAS', 1.6), _rrThrNight = _rn('R_RR_ROAS_NIGHT', 2.0);
     var RR = { thr: _rrNight ? _rrThrNight : _rrThrDay, thrDay: _rrThrDay, thrNight: _rrThrNight, night: _rrNight, hour: _rrHour, winStart: _rrNS, winEnd: _rrNE, minSpend: _rn('R_RR_MINSPEND', 30), minSales: _rn('R_RR_MINSALES', 1), coolMs: _rn('R_RR_COOLDOWN', 60) * 60000, maxFlips: _rn('R_RR_MAXFLIPS', 20), noSale: RULES.noSaleSpend };
     var rrLive = applyMode === 'live';
     var roboPaused = {}; try { var _rp = await env.RULES_KV.get('roboPaused'); if (_rp) { var _rpj = JSON.parse(_rp); if (_rpj && typeof _rpj === 'object') roboPaused = _rpj; } } catch (e) {}
     var rrLast = {}; try { var _rl = await env.RULES_KV.get('roasRuleAt'); if (_rl) { var _rlj = JSON.parse(_rl); if (_rlj && typeof _rlj === 'object') rrLast = _rlj; } } catch (e) {}
-    var rrNow = Date.now(), rrDirty = false, rrFlips = 0, rrPaused = [], rrReact = [], rrWouldP = [], rrWouldR = [], rrNoRev = [];
+    var rrNow = Date.now(), rrDirty = false, rrFlips = 0, rrPaused = [], rrReact = [], rrWouldP = [], rrWouldR = [], rrNoRev = [], rrOffAlert = [];
     for (var ri = 0; ri < camps.length && rrFlips < RR.maxFlips; ri++) {
       var cc = camps[ri];
       if ((cc.name || '').toUpperCase().indexOf('VALD') >= 0) continue; /* CP_VALD = gestão manual */
@@ -1521,11 +1521,13 @@ async function run(env, opts) {
           catch (eNS) { DIAG.rrErr = String((eNS && eNS.message) || eNS); continue; }
           roboPaused[cc.id] = { ts: rrNow, day: today, name: cc.name, noSale: true }; rrLast[cc.id] = rrNow; rrDirty = true;
           await new Promise(function (r) { setTimeout(r, 250); });
+          rrFlips++; rrPaused.push({ name: cc.name, id: cc.id, roas: 0, spend: Math.round(spend), sales: 0, noSale: true });
         }
-        rrFlips++; rrPaused.push({ name: cc.name, roas: 0, spend: Math.round(spend), sales: 0, noSale: true });
         continue;
       }
-      /* PAUSAR */
+      /* PAUSAR por ROAS baixo (< RR.thr: 1,6 dia 08h-00h / 2,0 madrugada 00h-08h).
+         LIVE: pausa + avisa (com ID). DRY (regra DESLIGADA): NÃO pausa — notifica na hora com o ID
+         pra pausar na mão (pedido 22/11). Cooldown p/ não repetir o aviso. */
       if (st === 'ACTIVE' && sales >= RR.minSales && spend >= RR.minSpend && hasRev && roas < RR.thr) {
         rrWouldP.push(cc.name + ' (ROAS ' + roas.toFixed(2) + ', ' + sales + 'v, receita $' + Math.round(rev) + ', gasto $' + Math.round(spend) + ')');
         if (!coolOk) continue;
@@ -1534,8 +1536,11 @@ async function run(env, opts) {
           catch (eP) { DIAG.rrErr = String((eP && eP.message) || eP); continue; }
           roboPaused[cc.id] = { ts: rrNow, day: today, name: cc.name, roas: +roas.toFixed(2) }; rrLast[cc.id] = rrNow; rrDirty = true;
           await new Promise(function (r) { setTimeout(r, 250); });
+          rrFlips++; rrPaused.push({ name: cc.name, id: cc.id, roas: +roas.toFixed(2), spend: Math.round(spend), sales: sales });
+        } else {
+          rrLast[cc.id] = rrNow; rrDirty = true;
+          rrOffAlert.push({ name: cc.name, id: cc.id, roas: +roas.toFixed(2), spend: Math.round(spend), sales: sales });
         }
-        rrFlips++; rrPaused.push({ name: cc.name, roas: +roas.toFixed(2), spend: Math.round(spend), sales: sales });
         continue;
       }
       /* REATIVAR (só as que o robô pausou) */
@@ -1559,11 +1564,13 @@ async function run(env, opts) {
       try { await env.RULES_KV.put('roboPaused', JSON.stringify(_cRP)); } catch (e) {}
       try { await env.RULES_KV.put('roasRuleAt', JSON.stringify(_cL)); } catch (e) {}
     }
-    DIAG.roasRule = { mode: applyMode, thr: RR.thr, thrDay: RR.thrDay, thrNight: RR.thrNight, night: RR.night, brHour: RR.hour, window: 'noite ' + RR.winStart + 'h-' + RR.winEnd + 'h BR', minSpend: RR.minSpend, minSales: RR.minSales, noSale: RR.noSale, cooldownMin: RR.coolMs / 60000, pausou: rrPaused.length, reativou: rrReact.length, semReceita: rrNoRev.length, wouldPause: rrWouldP.slice(0, 25), wouldReact: rrWouldR.slice(0, 25), noRev: rrNoRev.slice(0, 25) };
+    DIAG.roasRule = { mode: applyMode, thr: RR.thr, thrDay: RR.thrDay, thrNight: RR.thrNight, night: RR.night, brHour: RR.hour, window: 'noite ' + RR.winStart + 'h-' + RR.winEnd + 'h BR', minSpend: RR.minSpend, minSales: RR.minSales, noSale: RR.noSale, cooldownMin: RR.coolMs / 60000, pausou: rrPaused.length, reativou: rrReact.length, semReceita: rrNoRev.length, offAlert: rrOffAlert.length, wouldPause: rrWouldP.slice(0, 25), wouldReact: rrWouldR.slice(0, 25), offAlertList: rrOffAlert.slice(0, 25), noRev: rrNoRev.slice(0, 25) };
     var _rrTag = RR.night ? ' 🌙madrugada' : '';
     var _rrPRoas = rrPaused.filter(function (x) { return !x.noSale; });
     var _rrPNoSale = rrPaused.filter(function (x) { return x.noSale; });
-    if (rrLive && _rrPRoas.length && env.TG_TOKEN) await sendTelegram(env, '⏸️ PAUSADO por ROAS baixo (< ' + RR.thr + _rrTag + ') — ' + _rrPRoas.length + ' campanha(s):\n\n' + _rrPRoas.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)'; }).join('\n\n'));
+    if (rrLive && _rrPRoas.length && env.TG_TOKEN) await sendTelegram(env, '⏸️ PAUSADO por ROAS baixo (< ' + RR.thr + _rrTag + ') — ' + _rrPRoas.length + ' campanha(s):\n\n' + _rrPRoas.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)\n   ID: ' + x.id; }).join('\n\n'));
+    /* 🔔 REGRA DESLIGADA (dry): ROAS < limiar e o robô NÃO pausa — avisa na hora COM O ID p/ pausar na mão (pedido 22/11). */
+    if (!rrLive && rrOffAlert.length && env.TG_TOKEN) await sendTelegram(env, '⚠️ ROAS < ' + RR.thr + _rrTag + ' — REGRA DESLIGADA (pausar na mão?) — ' + rrOffAlert.length + ' campanha(s):\n\n' + rrOffAlert.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)\n   🆔 ' + x.id; }).join('\n\n'));
     if (rrLive && _rrPNoSale.length && env.TG_TOKEN) await sendTelegram(env, '🛑 PAUSADO SEM venda (gasto ≥ $' + RR.noSale + ', 0 venda) — ' + _rrPNoSale.length + ' campanha(s):\n\n' + _rrPNoSale.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   gasto $' + x.spend + ' · 0 venda'; }).join('\n\n'));
     if (rrLive && rrReact.length && env.TG_TOKEN) await sendTelegram(env, '▶️ REATIVADO — ROAS acima de ' + RR.thr + _rrTag + ' — ' + rrReact.length + ' campanha(s):\n\n' + rrReact.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)'; }).join('\n\n'));
   } catch (e) { DIAG.roasRuleErr = String((e && e.message) || e); }
