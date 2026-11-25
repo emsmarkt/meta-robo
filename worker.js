@@ -45,7 +45,7 @@ var RULES = {
   remLimRoas: 1.5, remLimStart: 10, remLimEnd: 23, // robo REMOVE o limite sozinho se ROAS > 1,5 entre remLimStart(10h) e remLimEnd(23h) BR (campanha recuperou).
   pauseRoas: 1.5, escRoas: 1.7, escPct: 0.20, pauseSalesBreak: 3, // ACOMPANHAR enquanto 1,3 < ROAS < 1,5 (01/10). escRoas (reativa/AUMENTA) segue 1,7
   critRoas: 1.4, critMinSpend: 50, critMinSales: 2, // 🔴 ROAS CRÍTICO (30/10): campanha ATIVA, gasto > critMinSpend($50), ROAS < 1,4 E >= critMinSales(2) vendas -> aviso Telegram + visual. SEM venda NÃO entra aqui (vai p/ noSaleSpend).
-  noSaleSpend: 50, // 🛑 SEM VENDA: campanha ATIVA, 0 venda e gasto >= $50 (23/11, era $60/$80) -> em LIVE o robô PAUSA; avisa no Telegram (live e dry) a cada 10min com ID.
+  noSaleSpend: 50, // 🛑 SEM VENDA: campanha ATIVA, 0 venda e gasto >= $50 (23/11, era $60/$80) -> em LIVE o robô PAUSA; avisa no Telegram (live e dry) a cada 30min por campanha com ID (25/11, era 10min).
   excRoas: 2.0, excMinSales: 3, scaleMult: 12, scaleUsePct: 0.2, releaseDaily: 500,
   aumRoasLow: 1.5, aumRoasHigh: 1.9, aumPctLow: 0.30, aumPctHigh: 0.70, aumMaxSales: 5,
   /* AUMENTAR (so SUGESTAO): so apos aumHourBR(20h) BR, ROAS de HOJE >= pauseRoas(1,5) E ROAS dos ult. 7 dias > aumRoas7dMin(1,4) -> subir o diario p/ aumMult(1,5)x o atual.
@@ -1495,7 +1495,7 @@ async function run(env, opts) {
     var _rrNS = _rn('R_RR_NIGHT_START', 0), _rrNE = _rn('R_RR_NIGHT_END', 8);
     var _rrNight = (_rrNS < _rrNE) ? (_rrHour >= _rrNS && _rrHour < _rrNE) : (_rrHour >= _rrNS || _rrHour < _rrNE);
     var _rrThrDay = _rn('R_RR_ROAS', 1.6), _rrThrNight = _rn('R_RR_ROAS_NIGHT', 2.0);
-    var RR = { thr: _rrNight ? _rrThrNight : _rrThrDay, thrDay: _rrThrDay, thrNight: _rrThrNight, night: _rrNight, hour: _rrHour, winStart: _rrNS, winEnd: _rrNE, minSpend: _rn('R_RR_MINSPEND', 30), minSales: _rn('R_RR_MINSALES', 1), coolMs: _rn('R_RR_COOLDOWN', 60) * 60000, maxFlips: _rn('R_RR_MAXFLIPS', 20), noSale: RULES.noSaleSpend, lowAlertMs: _rn('R_RR_LOWALERT_MIN', 10) * 60000, noSaleMemoEarly: _rn('R_NOSALE_MEMO_EARLY', 30), noSaleMemoLate: _rn('R_NOSALE_MEMO_LATE', 15), noSaleT2Night: _rn('R_NOSALE_T2_NIGHT', 40) };
+    var RR = { thr: _rrNight ? _rrThrNight : _rrThrDay, thrDay: _rrThrDay, thrNight: _rrThrNight, night: _rrNight, hour: _rrHour, winStart: _rrNS, winEnd: _rrNE, minSpend: _rn('R_RR_MINSPEND', 30), minSales: _rn('R_RR_MINSALES', 1), coolMs: _rn('R_RR_COOLDOWN', 60) * 60000, maxFlips: _rn('R_RR_MAXFLIPS', 20), noSale: RULES.noSaleSpend, lowAlertMs: _rn('R_RR_LOWALERT_MIN', 30) * 60000, noSaleMemoEarly: _rn('R_NOSALE_MEMO_EARLY', 30), noSaleMemoLate: _rn('R_NOSALE_MEMO_LATE', 15), noSaleT2Night: _rn('R_NOSALE_T2_NIGHT', 40) };
     /* 🛑 RÉGUA de sem-venda POR NOME + HORÁRIO (pedido 25/11), overrides do padrão RR.noSale ($50, vale dia 08h-00h e demais campanhas):
        • MEMO no nome: 00h-02h BR → $30 (noSaleMemoEarly); 02h-08h → $15 (noSaleMemoLate); dia → padrão.
        • T2 / TYPE 2 no nome: 00h-08h → $40 (noSaleT2Night); dia → padrão.
@@ -1509,7 +1509,9 @@ async function run(env, opts) {
     var rrLive = applyMode === 'live';
     var roboPaused = {}; try { var _rp = await env.RULES_KV.get('roboPaused'); if (_rp) { var _rpj = JSON.parse(_rp); if (_rpj && typeof _rpj === 'object') roboPaused = _rpj; } } catch (e) {}
     var rrLast = {}; try { var _rl = await env.RULES_KV.get('roasRuleAt'); if (_rl) { var _rlj = JSON.parse(_rl); if (_rlj && typeof _rlj === 'object') rrLast = _rlj; } } catch (e) {}
-    /* Dedup PRÓPRIO do aviso "ROAS < limiar" (a cada RR.lowAlertMs = 10 min), separado do cooldown de pausa (60 min). */
+    /* Dedup PRÓPRIO dos avisos (a cada RR.lowAlertMs = 30 min — pedido 25/11), separado do cooldown de pausa (60 min).
+       CHAVE POR REGRA: cc.id+':roas' (aviso ROAS<limiar) e cc.id+':ns' (aviso SEM venda) — uma regra NÃO segura a
+       outra. REATIVAR é outra regra (chave :react, ver reactList) e dispara na hora, independente destes 30 min. */
     var rrLowLast = {}; try { var _rll = await env.RULES_KV.get('roasLowAt'); if (_rll) { var _rllj = JSON.parse(_rll); if (_rllj && typeof _rllj === 'object') rrLowLast = _rllj; } } catch (e) {}
     var rrNow = Date.now(), rrDirty = false, rrLowDirty = false, rrFlips = 0, rrPaused = [], rrReact = [], rrWouldP = [], rrWouldR = [], rrNoRev = [], rrOffAlert = [], rrNoSaleAlert = [];
     for (var ri = 0; ri < camps.length && rrFlips < RR.maxFlips; ri++) {
@@ -1538,16 +1540,16 @@ async function run(env, opts) {
           rrFlips++; rrPaused.push({ name: cc.name, id: cc.id, roas: 0, spend: Math.round(spend), sales: 0, noSale: true, thr: _nsThr });
           _nsPausedNow = true;
         }
-        /* AVISO SEM venda (a cada 10 min, COM ID) p/ quem NÃO foi pausada agora — em live E em dry (pedido 23/11). */
-        if (!_nsPausedNow && (rrNow - (rrLowLast[cc.id] || 0)) >= RR.lowAlertMs) {
-          rrLowLast[cc.id] = rrNow; rrLowDirty = true;
+        /* AVISO SEM venda (repete a cada 30 min por campanha NESTA regra, COM ID) p/ quem NÃO foi pausada agora — em live E em dry (pedido 23/11, 30min 25/11). Chave :ns (própria da regra sem-venda). */
+        if (!_nsPausedNow && (rrNow - (rrLowLast[cc.id + ':ns'] || 0)) >= RR.lowAlertMs) {
+          rrLowLast[cc.id + ':ns'] = rrNow; rrLowDirty = true;
           rrNoSaleAlert.push({ name: cc.name, id: cc.id, spend: Math.round(spend), thr: _nsThr });
         }
         continue;
       }
       /* PAUSAR por ROAS baixo (< RR.thr: 1,6 dia 08h-00h / 2,0 madrugada 00h-08h).
          LIVE + cooldown-ok: PAUSA + avisa "PAUSADO" (com ID). Quem NÃO foi pausada agora (regra desligada=dry,
-         ou live mas em cooldown/limite de flips): AVISA "ROAS < limiar" a cada RR.lowAlertMs (10 min) COM O ID
+         ou live mas em cooldown/limite de flips): AVISA "ROAS < limiar" a cada RR.lowAlertMs (30 min) COM O ID
          (pedido 22/11/23/11), em QUALQUER modo. */
       if (st === 'ACTIVE' && sales >= RR.minSales && spend >= RR.minSpend && hasRev && roas < RR.thr) {
         rrWouldP.push(cc.name + ' (ROAS ' + roas.toFixed(2) + ', ' + sales + 'v, receita $' + Math.round(rev) + ', gasto $' + Math.round(spend) + ')');
@@ -1560,9 +1562,9 @@ async function run(env, opts) {
           rrFlips++; rrPaused.push({ name: cc.name, id: cc.id, roas: +roas.toFixed(2), spend: Math.round(spend), sales: sales });
           _pausedNow = true;
         }
-        /* AVISO ROAS<limiar (10 min) p/ quem NÃO foi pausada agora — em live E em dry. */
-        if (!_pausedNow && (rrNow - (rrLowLast[cc.id] || 0)) >= RR.lowAlertMs) {
-          rrLowLast[cc.id] = rrNow; rrLowDirty = true;
+        /* AVISO ROAS<limiar (repete a cada 30 min por campanha NESTA regra) p/ quem NÃO foi pausada agora — em live E em dry. Chave :roas (própria da regra de ROAS). */
+        if (!_pausedNow && (rrNow - (rrLowLast[cc.id + ':roas'] || 0)) >= RR.lowAlertMs) {
+          rrLowLast[cc.id + ':roas'] = rrNow; rrLowDirty = true;
           rrOffAlert.push({ name: cc.name, id: cc.id, roas: +roas.toFixed(2), spend: Math.round(spend), sales: sales });
         }
         continue;
@@ -1598,11 +1600,11 @@ async function run(env, opts) {
     var _rrPRoas = rrPaused.filter(function (x) { return !x.noSale; });
     var _rrPNoSale = rrPaused.filter(function (x) { return x.noSale; });
     if (rrLive && _rrPRoas.length && env.TG_TOKEN) await sendTelegram(env, '⏸️ PAUSADO por ROAS baixo (< ' + RR.thr + _rrTag + ') — ' + _rrPRoas.length + ' campanha(s):\n\n' + _rrPRoas.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)\n   ID: ' + x.id; }).join('\n\n'));
-    /* 🔔 AVISO ROAS < limiar (a cada 10 min, COM ID) — campanhas abaixo do limiar que NÃO foram pausadas agora.
+    /* 🔔 AVISO ROAS < limiar (a cada 30 min por campanha, COM ID) — campanhas abaixo do limiar que NÃO foram pausadas agora.
        Em DRY = regra desligada (pausar na mão). Em LIVE = o robô vai pausar mas está em cooldown/limite. Vale os 2 modos. */
     if (rrOffAlert.length && env.TG_TOKEN) await sendTelegram(env, '⚠️ ROAS < ' + RR.thr + _rrTag + (rrLive ? '' : ' — REGRA DESLIGADA (pausar na mão?)') + ' — ' + rrOffAlert.length + ' campanha(s):\n\n' + rrOffAlert.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)\n   🆔 ' + x.id; }).join('\n\n'));
     if (rrLive && _rrPNoSale.length && env.TG_TOKEN) await sendTelegram(env, '🛑 PAUSADO SEM venda — ' + _rrPNoSale.length + ' campanha(s):\n\n' + _rrPNoSale.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   gasto $' + x.spend + ' ≥ $' + (x.thr != null ? x.thr : RR.noSale) + ' · 0 venda\n   ID: ' + x.id; }).join('\n\n'));
-    /* 🔔 AVISO SEM venda (a cada 10 min, COM ID) — sem venda e NÃO foi pausada agora (dry, ou live em cooldown/limite). Régua por campanha (MEMO/T2/horário). */
+    /* 🔔 AVISO SEM venda (a cada 30 min por campanha, COM ID) — sem venda e NÃO foi pausada agora (dry, ou live em cooldown/limite). Régua por campanha (MEMO/T2/horário). */
     if (rrNoSaleAlert.length && env.TG_TOKEN) await sendTelegram(env, '🛑 SEM venda' + (rrLive ? '' : ' (regra DESLIGADA — pausar na mão?)') + ' — ' + rrNoSaleAlert.length + ' campanha(s):\n\n' + rrNoSaleAlert.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   gasto $' + x.spend + ' ≥ $' + (x.thr != null ? x.thr : RR.noSale) + ' · 0 venda\n   🆔 ' + x.id; }).join('\n\n'));
     if (rrLive && rrReact.length && env.TG_TOKEN) await sendTelegram(env, '▶️ REATIVADO — ROAS acima de ' + RR.thr + _rrTag + ' — ' + rrReact.length + ' campanha(s):\n\n' + rrReact.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)'; }).join('\n\n'));
   } catch (e) { DIAG.roasRuleErr = String((e && e.message) || e); }
