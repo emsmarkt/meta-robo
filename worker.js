@@ -1847,9 +1847,19 @@ export default {
     /* LEITURA (Dash 2 lê): agrega as vendas por CAMPANHA no período. ?since=YYYY-MM-DD&until=YYYY-MM-DD (dia BR).
        Devolve { byCamp: { campId: { sales, revenue } } }. Usa a metadata do list (sem 1 GET por venda). */
     if (path === '/pbsales') {
+      var _psSince = _u.searchParams.get('since') || brDatePlus(0);
+      var _psUntil = _u.searchParams.get('until') || _psSince;
+      var _psKey = 'pbsalesCache:' + _psSince + ':' + _psUntil;
+      var _psTtl = parseInt(env.PB_CACHE_TTL || '120') || 120;
+      /* CACHE (default 120s): o dashboard faz poll a cada 60s em vários aparelhos; sem cache isso estoura o
+         limite diário de list() do KV (free=1000/dia) e derruba leitura de vendas E push. Serve do cache
+         (get, barato e compartilhado entre aparelhos) e só re-lista quando o cache vence. ?fresh=1 força re-listar. */
+      if (_u.searchParams.get('fresh') !== '1') {
+        try { var _psC = await env.RULES_KV.get(_psKey); if (_psC) { var _pj = JSON.parse(_psC); _pj.cached = true; return jsonResp(_pj); } } catch (e) {}
+      }
       try {
-        var since = _u.searchParams.get('since') || brDatePlus(0);
-        var until = _u.searchParams.get('until') || since;
+        var since = _psSince;
+        var until = _psUntil;
         var days = [];
         var d0 = Date.parse(since + 'T00:00:00Z'), d1 = Date.parse(until + 'T00:00:00Z');
         if (isFinite(d0) && isFinite(d1) && d1 >= d0 && (d1 - d0) <= 370 * 86400000) { for (var tt = d0; tt <= d1; tt += 86400000) days.push(new Date(tt).toISOString().slice(0, 10)); } else days = [since];
@@ -1883,7 +1893,9 @@ export default {
             cur2 = lst2.list_complete ? null : lst2.cursor;
           } while (cur2);
         }
-        return jsonResp({ byCamp: byCamp, days: days.length });
+        var _psOut = { byCamp: byCamp, days: days.length, at: Date.now() };
+        try { await env.RULES_KV.put(_psKey, JSON.stringify(_psOut), { expirationTtl: _psTtl }); } catch (e) {}
+        return jsonResp(_psOut);
       } catch (e) {
         return jsonResp({ byCamp: {}, err: 'pbsales: ' + String((e && e.message) || e) });
       }
@@ -1949,21 +1961,25 @@ export default {
     /* DIAGNÓSTICO: registros CRUS de venda de um dia (plataforma, saleId, hora BR, tipo, valor, utm). ?day=YYYY-MM-DD */
     if (path === '/pbraw') {
       var rday = /^\d{4}-\d{2}-\d{2}$/.test(_u.searchParams.get('day') || '') ? _u.searchParams.get('day') : brDatePlus(0);
-      var recs = [], rcur = undefined, n = 0;
-      do {
-        var rl = await env.RULES_KV.list({ prefix: 'pbsale:' + rday + ':', cursor: rcur, limit: 1000 });
-        for (var ri = 0; ri < (rl.keys || []).length && n < 300; ri++) {
-          var kk = rl.keys[ri];
-          var raw = null; try { raw = await env.RULES_KV.get(kk.name); } catch (e) {}
-          var rec = {}; try { rec = raw ? JSON.parse(raw) : {}; } catch (e) {}
-          var hhBR = rec.ts ? new Date(rec.ts - 3 * 3600000).toISOString().slice(11, 16) : '?';
-          recs.push({ hora_BR: hhBR, plat: rec.plat || '?', type: rec.type || '?', valor: rec.amt, cur: rec.cur || '?', camp: rec.camp || '', ad: rec.ad || '', saleId: rec.sale || '', utm_campaign: rec.utmc || '', refund: !!rec.refund });
-          n++;
-        }
-        rcur = rl.list_complete ? null : rl.cursor;
-      } while (rcur && n < 300);
-      recs.sort(function (a, b) { return (a.hora_BR < b.hora_BR) ? -1 : 1; });
-      return jsonResp({ day: rday, total: recs.length, vendas: recs });
+      try {
+        var recs = [], rcur = undefined, n = 0;
+        do {
+          var rl = await env.RULES_KV.list({ prefix: 'pbsale:' + rday + ':', cursor: rcur, limit: 1000 });
+          for (var ri = 0; ri < (rl.keys || []).length && n < 300; ri++) {
+            var kk = rl.keys[ri];
+            var raw = null; try { raw = await env.RULES_KV.get(kk.name); } catch (e) {}
+            var rec = {}; try { rec = raw ? JSON.parse(raw) : {}; } catch (e) {}
+            var hhBR = rec.ts ? new Date(rec.ts - 3 * 3600000).toISOString().slice(11, 16) : '?';
+            recs.push({ hora_BR: hhBR, plat: rec.plat || '?', type: rec.type || '?', valor: rec.amt, cur: rec.cur || '?', camp: rec.camp || '', ad: rec.ad || '', saleId: rec.sale || '', utm_campaign: rec.utmc || '', refund: !!rec.refund });
+            n++;
+          }
+          rcur = rl.list_complete ? null : rl.cursor;
+        } while (rcur && n < 300);
+        recs.sort(function (a, b) { return (a.hora_BR < b.hora_BR) ? -1 : 1; });
+        return jsonResp({ day: rday, total: recs.length, vendas: recs });
+      } catch (e) {
+        return jsonResp({ day: rday, total: 0, vendas: [], err: 'pbraw: ' + String((e && e.message) || e) });
+      }
     }
     /* DEBUG: últimos payloads CRUS do WEBHOOK da HW (JSON POST em /pb). Serve p/ ver o formato real do evento
        "Entrou no checkout" (nome do evento, utm_campaign, id de sessão) e então travar a extração do IC. */
