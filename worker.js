@@ -1495,7 +1495,17 @@ async function run(env, opts) {
     var _rrNS = _rn('R_RR_NIGHT_START', 0), _rrNE = _rn('R_RR_NIGHT_END', 8);
     var _rrNight = (_rrNS < _rrNE) ? (_rrHour >= _rrNS && _rrHour < _rrNE) : (_rrHour >= _rrNS || _rrHour < _rrNE);
     var _rrThrDay = _rn('R_RR_ROAS', 1.6), _rrThrNight = _rn('R_RR_ROAS_NIGHT', 2.0);
-    var RR = { thr: _rrNight ? _rrThrNight : _rrThrDay, thrDay: _rrThrDay, thrNight: _rrThrNight, night: _rrNight, hour: _rrHour, winStart: _rrNS, winEnd: _rrNE, minSpend: _rn('R_RR_MINSPEND', 30), minSales: _rn('R_RR_MINSALES', 1), coolMs: _rn('R_RR_COOLDOWN', 60) * 60000, maxFlips: _rn('R_RR_MAXFLIPS', 20), noSale: RULES.noSaleSpend, lowAlertMs: _rn('R_RR_LOWALERT_MIN', 10) * 60000 };
+    var RR = { thr: _rrNight ? _rrThrNight : _rrThrDay, thrDay: _rrThrDay, thrNight: _rrThrNight, night: _rrNight, hour: _rrHour, winStart: _rrNS, winEnd: _rrNE, minSpend: _rn('R_RR_MINSPEND', 30), minSales: _rn('R_RR_MINSALES', 1), coolMs: _rn('R_RR_COOLDOWN', 60) * 60000, maxFlips: _rn('R_RR_MAXFLIPS', 20), noSale: RULES.noSaleSpend, lowAlertMs: _rn('R_RR_LOWALERT_MIN', 10) * 60000, noSaleMemoEarly: _rn('R_NOSALE_MEMO_EARLY', 30), noSaleMemoLate: _rn('R_NOSALE_MEMO_LATE', 15), noSaleT2Night: _rn('R_NOSALE_T2_NIGHT', 40) };
+    /* 🛑 RÉGUA de sem-venda POR NOME + HORÁRIO (pedido 25/11), overrides do padrão RR.noSale ($50, vale dia 08h-00h e demais campanhas):
+       • MEMO no nome: 00h-02h BR → $30 (noSaleMemoEarly); 02h-08h → $15 (noSaleMemoLate); dia → padrão.
+       • T2 / TYPE 2 no nome: 00h-08h → $40 (noSaleT2Night); dia → padrão.
+       Se a campanha tiver MEMO E T2, MEMO vence (mais restritivo, cita 1o no pedido). */
+    var _nsThrFor = function (nm) {
+      var u = (nm || '').toUpperCase(), hr = RR.hour;
+      if (u.indexOf('MEMO') >= 0) { if (hr < 2) return RR.noSaleMemoEarly; if (hr < 8) return RR.noSaleMemoLate; return RR.noSale; }
+      if (/(?:^|[^A-Z0-9])T2(?:[^0-9]|$)/.test(u) || u.indexOf('TYPE 2') >= 0 || u.indexOf('TYPE2') >= 0) { if (hr < 8) return RR.noSaleT2Night; return RR.noSale; }
+      return RR.noSale;
+    };
     var rrLive = applyMode === 'live';
     var roboPaused = {}; try { var _rp = await env.RULES_KV.get('roboPaused'); if (_rp) { var _rpj = JSON.parse(_rp); if (_rpj && typeof _rpj === 'object') roboPaused = _rpj; } } catch (e) {}
     var rrLast = {}; try { var _rl = await env.RULES_KV.get('roasRuleAt'); if (_rl) { var _rlj = JSON.parse(_rl); if (_rlj && typeof _rlj === 'object') rrLast = _rlj; } } catch (e) {}
@@ -1516,21 +1526,22 @@ async function run(env, opts) {
       /* 🛑 PAUSAR SEM VENDA: ACTIVE, 0 venda hoje, gasto >= RR.noSale ($60) e RedTrack OK no ciclo -> PAUSA de vez.
          Precisa cc._rtOk (se a busca do RedTrack falhou, vendas=0 é falso e pausaria todo mundo). NÃO reativa
          sozinho (a reativação exige venda, que campanha pausada não tem). Respeita cooldown/maxFlips. */
-      if (st === 'ACTIVE' && sales === 0 && cc._rtOk && spend >= RR.noSale) {
-        rrWouldP.push(cc.name + ' (SEM venda, gasto $' + Math.round(spend) + ' >= $' + RR.noSale + ')');
+      var _nsThr = _nsThrFor(cc.name); /* régua por NOME+HORÁRIO (MEMO/T2) ou padrão $50 */
+      if (st === 'ACTIVE' && sales === 0 && cc._rtOk && spend >= _nsThr) {
+        rrWouldP.push(cc.name + ' (SEM venda, gasto $' + Math.round(spend) + ' >= $' + _nsThr + ')');
         var _nsPausedNow = false;
         if (rrLive && coolOk) {
           try { await withTokenFallback(tokens, cc._tk, (function (id) { return function (tk) { return postForm(id, tk, { status: 'PAUSED' }); }; })(cc.id)); }
           catch (eNS) { DIAG.rrErr = String((eNS && eNS.message) || eNS); continue; }
           roboPaused[cc.id] = { ts: rrNow, day: today, name: cc.name, noSale: true }; rrLast[cc.id] = rrNow; rrDirty = true;
           await new Promise(function (r) { setTimeout(r, 250); });
-          rrFlips++; rrPaused.push({ name: cc.name, id: cc.id, roas: 0, spend: Math.round(spend), sales: 0, noSale: true });
+          rrFlips++; rrPaused.push({ name: cc.name, id: cc.id, roas: 0, spend: Math.round(spend), sales: 0, noSale: true, thr: _nsThr });
           _nsPausedNow = true;
         }
         /* AVISO SEM venda (a cada 10 min, COM ID) p/ quem NÃO foi pausada agora — em live E em dry (pedido 23/11). */
         if (!_nsPausedNow && (rrNow - (rrLowLast[cc.id] || 0)) >= RR.lowAlertMs) {
           rrLowLast[cc.id] = rrNow; rrLowDirty = true;
-          rrNoSaleAlert.push({ name: cc.name, id: cc.id, spend: Math.round(spend) });
+          rrNoSaleAlert.push({ name: cc.name, id: cc.id, spend: Math.round(spend), thr: _nsThr });
         }
         continue;
       }
@@ -1582,7 +1593,7 @@ async function run(env, opts) {
       var _cLL = {}; Object.keys(rrLowLast).forEach(function (k) { if (rrLowLast[k] >= _cutL) _cLL[k] = rrLowLast[k]; });
       try { await env.RULES_KV.put('roasLowAt', JSON.stringify(_cLL)); } catch (e) {}
     }
-    DIAG.roasRule = { mode: applyMode, thr: RR.thr, thrDay: RR.thrDay, thrNight: RR.thrNight, night: RR.night, brHour: RR.hour, window: 'noite ' + RR.winStart + 'h-' + RR.winEnd + 'h BR', minSpend: RR.minSpend, minSales: RR.minSales, noSale: RR.noSale, cooldownMin: RR.coolMs / 60000, pausou: rrPaused.length, reativou: rrReact.length, semReceita: rrNoRev.length, offAlert: rrOffAlert.length, noSaleAlert: rrNoSaleAlert.length, lowAlertMin: RR.lowAlertMs / 60000, wouldPause: rrWouldP.slice(0, 25), wouldReact: rrWouldR.slice(0, 25), offAlertList: rrOffAlert.slice(0, 25), noSaleAlertList: rrNoSaleAlert.slice(0, 25), noRev: rrNoRev.slice(0, 25) };
+    DIAG.roasRule = { mode: applyMode, thr: RR.thr, thrDay: RR.thrDay, thrNight: RR.thrNight, night: RR.night, brHour: RR.hour, window: 'noite ' + RR.winStart + 'h-' + RR.winEnd + 'h BR', minSpend: RR.minSpend, minSales: RR.minSales, noSale: RR.noSale, noSaleReguas: { padrao: RR.noSale, memo_00_02h: RR.noSaleMemoEarly, memo_02_08h: RR.noSaleMemoLate, t2_00_08h: RR.noSaleT2Night }, cooldownMin: RR.coolMs / 60000, pausou: rrPaused.length, reativou: rrReact.length, semReceita: rrNoRev.length, offAlert: rrOffAlert.length, noSaleAlert: rrNoSaleAlert.length, lowAlertMin: RR.lowAlertMs / 60000, wouldPause: rrWouldP.slice(0, 25), wouldReact: rrWouldR.slice(0, 25), offAlertList: rrOffAlert.slice(0, 25), noSaleAlertList: rrNoSaleAlert.slice(0, 25), noRev: rrNoRev.slice(0, 25) };
     var _rrTag = RR.night ? ' 🌙madrugada' : '';
     var _rrPRoas = rrPaused.filter(function (x) { return !x.noSale; });
     var _rrPNoSale = rrPaused.filter(function (x) { return x.noSale; });
@@ -1590,9 +1601,9 @@ async function run(env, opts) {
     /* 🔔 AVISO ROAS < limiar (a cada 10 min, COM ID) — campanhas abaixo do limiar que NÃO foram pausadas agora.
        Em DRY = regra desligada (pausar na mão). Em LIVE = o robô vai pausar mas está em cooldown/limite. Vale os 2 modos. */
     if (rrOffAlert.length && env.TG_TOKEN) await sendTelegram(env, '⚠️ ROAS < ' + RR.thr + _rrTag + (rrLive ? '' : ' — REGRA DESLIGADA (pausar na mão?)') + ' — ' + rrOffAlert.length + ' campanha(s):\n\n' + rrOffAlert.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)\n   🆔 ' + x.id; }).join('\n\n'));
-    if (rrLive && _rrPNoSale.length && env.TG_TOKEN) await sendTelegram(env, '🛑 PAUSADO SEM venda (gasto ≥ $' + RR.noSale + ', 0 venda) — ' + _rrPNoSale.length + ' campanha(s):\n\n' + _rrPNoSale.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   gasto $' + x.spend + ' · 0 venda\n   ID: ' + x.id; }).join('\n\n'));
-    /* 🔔 AVISO SEM venda (a cada 10 min, COM ID) — gastou ≥ $50 sem venda e NÃO foi pausada agora (dry, ou live em cooldown/limite). */
-    if (rrNoSaleAlert.length && env.TG_TOKEN) await sendTelegram(env, '🛑 SEM venda — gasto ≥ $' + RR.noSale + (rrLive ? '' : ' (regra DESLIGADA — pausar na mão?)') + ' — ' + rrNoSaleAlert.length + ' campanha(s):\n\n' + rrNoSaleAlert.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   gasto $' + x.spend + ' · 0 venda\n   🆔 ' + x.id; }).join('\n\n'));
+    if (rrLive && _rrPNoSale.length && env.TG_TOKEN) await sendTelegram(env, '🛑 PAUSADO SEM venda — ' + _rrPNoSale.length + ' campanha(s):\n\n' + _rrPNoSale.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   gasto $' + x.spend + ' ≥ $' + (x.thr != null ? x.thr : RR.noSale) + ' · 0 venda\n   ID: ' + x.id; }).join('\n\n'));
+    /* 🔔 AVISO SEM venda (a cada 10 min, COM ID) — sem venda e NÃO foi pausada agora (dry, ou live em cooldown/limite). Régua por campanha (MEMO/T2/horário). */
+    if (rrNoSaleAlert.length && env.TG_TOKEN) await sendTelegram(env, '🛑 SEM venda' + (rrLive ? '' : ' (regra DESLIGADA — pausar na mão?)') + ' — ' + rrNoSaleAlert.length + ' campanha(s):\n\n' + rrNoSaleAlert.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   gasto $' + x.spend + ' ≥ $' + (x.thr != null ? x.thr : RR.noSale) + ' · 0 venda\n   🆔 ' + x.id; }).join('\n\n'));
     if (rrLive && rrReact.length && env.TG_TOKEN) await sendTelegram(env, '▶️ REATIVADO — ROAS acima de ' + RR.thr + _rrTag + ' — ' + rrReact.length + ' campanha(s):\n\n' + rrReact.slice(0, 25).map(function (x) { return '• ' + x.name + '\n   ROAS ' + x.roas + ' · gasto $' + x.spend + ' · ' + x.sales + ' venda(s)'; }).join('\n\n'));
   } catch (e) { DIAG.roasRuleErr = String((e && e.message) || e); }
 
