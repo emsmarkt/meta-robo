@@ -1409,7 +1409,8 @@ async function run(env, opts) {
         await sendTelegram(env, '⏰ REATIVAR — ' + linesR.length + ' campanha(s) pausada(s) ha >' + RULES.pauseAlertMin + ' min com ROAS > ' + RULES.reactRoas + ':\n\n' + showR.join('\n\n'));
       }
       /* 🚫 AVISO "CBO DIÁRIO caro sem venda" REMOVIDO (pedido do usuário 01/10). */
-      try { await env.RULES_KV.put('tgSent', JSON.stringify(newSent)); } catch (e) {}
+      var _nsStr = JSON.stringify(newSent); /* 25/11: só grava tgSent se MUDOU (novo envio/poda) — antes gravava TODA rodada (288/dia). Economia ~250 escritas KV/dia no plano Free, sem efeito visível. */
+      if (_nsStr !== (ss || '{}')) { try { await env.RULES_KV.put('tgSent', _nsStr); } catch (e) {} }
 
       /* CONTA BLOQUEADA (status 2) que gastou nos ult. 7 dias -> avisa 1x SO (ate a conta voltar a ativa).
          Anti-spam separado do tgSent (nao e por dia): KV 'blockedNotified' = { id: true }. */
@@ -1486,15 +1487,15 @@ async function run(env, opts) {
      • ROAS = receita REAL do RedTrack (c._rev, em USD) / gasto. SEM valor fixo por venda (18/11): comissão
        varia ($120–$230), então usar 120 fixo distorcia o ROAS e pausava campanha boa / reativava ruim. Se a
        receita real ainda não chegou (rev=0 com venda contada), o robô NÃO age (entra em DIAG.roasRule.noRev).
-     • LIMIAR POR HORÁRIO (18/11, pedido Emerson): MADRUGADA 00h–08h BR = thrNight(2.0);
-       resto do dia 08h–00h = thrDay(1.5). Pausa abaixo / reativa acima do limiar DAQUELA hora.
-       Janela e limiares configuráveis: R_RR_ROAS(1.6 dia 08h-00h), R_RR_ROAS_NIGHT(2.0 madrugada 00h-08h), R_RR_NIGHT_START(0), R_RR_NIGHT_END(8). */
+     • LIMIAR POR HORÁRIO (18/11, pedido Emerson): MADRUGADA 00h–08h BR = thrNight(1.7; era 2.0 — baixado 28/11);
+       resto do dia 08h–00h = thrDay(1.6). Pausa abaixo / reativa acima do limiar DAQUELA hora.
+       Janela e limiares configuráveis: R_RR_ROAS(1.6 dia 08h-00h), R_RR_ROAS_NIGHT(1.7 madrugada 00h-08h), R_RR_NIGHT_START(0), R_RR_NIGHT_END(8). */
   try {
     var _rn = function (k, d) { var v = parseFloat(env[k]); return isFinite(v) ? v : d; };
     var _rrHour = brHour();
     var _rrNS = _rn('R_RR_NIGHT_START', 0), _rrNE = _rn('R_RR_NIGHT_END', 8);
     var _rrNight = (_rrNS < _rrNE) ? (_rrHour >= _rrNS && _rrHour < _rrNE) : (_rrHour >= _rrNS || _rrHour < _rrNE);
-    var _rrThrDay = _rn('R_RR_ROAS', 1.6), _rrThrNight = _rn('R_RR_ROAS_NIGHT', 2.0);
+    var _rrThrDay = _rn('R_RR_ROAS', 1.6), _rrThrNight = _rn('R_RR_ROAS_NIGHT', 1.7);
     var RR = { thr: _rrNight ? _rrThrNight : _rrThrDay, thrDay: _rrThrDay, thrNight: _rrThrNight, night: _rrNight, hour: _rrHour, winStart: _rrNS, winEnd: _rrNE, minSpend: _rn('R_RR_MINSPEND', 30), minSales: _rn('R_RR_MINSALES', 1), coolMs: _rn('R_RR_COOLDOWN', 60) * 60000, maxFlips: _rn('R_RR_MAXFLIPS', 20), noSale: RULES.noSaleSpend, lowAlertMs: _rn('R_RR_LOWALERT_MIN', 30) * 60000, noSaleMemoEarly: _rn('R_NOSALE_MEMO_EARLY', 30), noSaleMemoLate: _rn('R_NOSALE_MEMO_LATE', 15), noSaleT2Night: _rn('R_NOSALE_T2_NIGHT', 40) };
     /* 🛑 RÉGUA de sem-venda POR NOME + HORÁRIO (pedido 25/11), overrides do padrão RR.noSale ($50, vale dia 08h-00h e demais campanhas):
        • MEMO no nome: 00h-02h BR → $30 (noSaleMemoEarly); 02h-08h → $15 (noSaleMemoLate); dia → padrão.
@@ -1547,7 +1548,7 @@ async function run(env, opts) {
         }
         continue;
       }
-      /* PAUSAR por ROAS baixo (< RR.thr: 1,6 dia 08h-00h / 2,0 madrugada 00h-08h).
+      /* PAUSAR por ROAS baixo (< RR.thr: 1,6 dia 08h-00h / 1,7 madrugada 00h-08h).
          LIVE + cooldown-ok: PAUSA + avisa "PAUSADO" (com ID). Quem NÃO foi pausada agora (regra desligada=dry,
          ou live mas em cooldown/limite de flips): AVISA "ROAS < limiar" a cada RR.lowAlertMs (30 min) COM O ID
          (pedido 22/11/23/11), em QUALQUER modo. */
@@ -1863,10 +1864,12 @@ export default {
       var _psSince = _u.searchParams.get('since') || brDatePlus(0);
       var _psUntil = _u.searchParams.get('until') || _psSince;
       var _psKey = 'pbsalesCache:' + _psSince + ':' + _psUntil;
-      var _psTtl = parseInt(env.PB_CACHE_TTL || '120') || 120;
-      /* CACHE (default 120s): o dashboard faz poll a cada 60s em vários aparelhos; sem cache isso estoura o
-         limite diário de list() do KV (free=1000/dia) e derruba leitura de vendas E push. Serve do cache
-         (get, barato e compartilhado entre aparelhos) e só re-lista quando o cache vence. ?fresh=1 força re-listar. */
+      var _psTtl = parseInt(env.PB_CACHE_TTL || '300') || 300;
+      /* CACHE (default 300s desde 25/11, era 120s): o dashboard faz poll a cada 60s em vários aparelhos; sem cache
+         isso estoura o limite diário de list() E write() do KV (free=1000/dia cada) e derruba leitura de vendas E push.
+         300s corta list+write dessa rota ~2,5x (a CONTAGEM do dash atualiza a cada 5min; o PUSH da venda segue
+         instantâneo pelo /pb). Serve do cache (get, barato e compartilhado entre aparelhos) e só re-lista quando o
+         cache vence. ?fresh=1 força re-listar. Ajustável por env PB_CACHE_TTL. */
       if (_u.searchParams.get('fresh') !== '1') {
         try { var _psC = await env.RULES_KV.get(_psKey); if (_psC) { var _pj = JSON.parse(_psC); _pj.cached = true; return jsonResp(_pj); } } catch (e) {}
       }
